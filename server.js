@@ -31,17 +31,25 @@ const SUB_RE = /^[0-9a-fA-F-]{1,40}$|^[\w .()-]{1,80}$/; // sub id or display na
 
 function isValidName(v) { return typeof v === 'string' && NAME_RE.test(v); }
 
-/** Run az with an args array (no shell => no injection). Returns parsed JSON. */
+/** Run az with an args array. Returns parsed JSON.
+ *  az() only runs trusted, fixed commands (get-access-token / logout) — never user
+ *  input — so enabling the shell on Windows (required to launch az.cmd) is safe here. */
 function az(args, { json = true } = {}) {
   const finalArgs = json ? [...args, '--output', 'json'] : args;
+  const isWin = process.platform === 'win32';
   return new Promise((resolve, reject) => {
-    execFile(AZ, finalArgs, { timeout: AZ_TIMEOUT, maxBuffer: 64 * 1024 * 1024 },
-      (err, stdout, stderr) => {
+    execFile(AZ, finalArgs, {
+      timeout: AZ_TIMEOUT, maxBuffer: 64 * 1024 * 1024,
+      shell: isWin,          // on Windows the CLI is `az.cmd`; execFile can't run it without a shell
+      windowsHide: true,
+    }, (err, stdout, stderr) => {
         if (err) {
           const msg = (stderr || err.message || '').trim();
-          return reject(Object.assign(new Error(msg || 'az command failed'), {
-            azError: true,
-            needLogin: /AADSTS70043|refresh token|az login|InvalidAuthenticationToken|expired/i.test(msg),
+          const notFound = err.code === 'ENOENT' || /not recognized|cannot find the (path|file)|ENOENT/i.test(msg);
+          return reject(Object.assign(new Error(
+            notFound ? `Azure CLI not found (tried "${AZ}"). Install the Azure CLI, or set AZ_PATH to its full path.` : (msg || 'az command failed')), {
+            azError: true, notFound,
+            needLogin: /AADSTS70043|refresh token|please run ['"]?az login|InvalidAuthenticationToken|expired|no subscription|not logged in/i.test(msg),
             forbidden: /Forbidden|does not have secrets|AccessDenied|not authorized|403/i.test(msg),
             stderr: msg, args: finalArgs,
           }));
