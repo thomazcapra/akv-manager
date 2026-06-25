@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Keyvault Console — Accounts · Subscriptions · Expiry</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0A0D14; --ink2:#0C1019;
+    --panel:#121826; --panel2:#0E141F; --raise:#171F2E;
+    --line:#222C3E; --line2:#1A2233;
+    --text:#E6EBF2; --muted:#79859B; --faint:#4C586E;
+    --azure:#5B9DFF; --azure2:#3F86F0; --azuredim:rgba(91,157,255,.12);
+    --ok:#46D6B4; --warn:#F2B53D; --alert:#FF5C6C; --bad:#FF5C6C; --good:#46D6B4;
+    --violet:#A98BFF;
+    --r:12px; --r-sm:8px;
+    --shadow:0 18px 40px -22px rgba(0,0,0,.8);
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{font-family:var(--sans);font-size:14px;line-height:1.5;color:var(--text);min-height:100vh;
+       background:
+         radial-gradient(900px 500px at 88% -8%,rgba(91,157,255,.07),transparent 60%),
+         linear-gradient(180deg,var(--ink2),var(--ink));
+       -webkit-font-smoothing:antialiased}
+  ::selection{background:rgba(91,157,255,.32)}
+  a{color:var(--azure);text-decoration:none}
+  :focus-visible{outline:2px solid var(--azure);outline-offset:2px;border-radius:4px}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .muted{color:var(--muted)} .faint{color:var(--faint)} .right{text-align:right}
+  .hide{display:none!important}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;font-weight:500;letter-spacing:.18em;
+           text-transform:uppercase;color:var(--faint)}
+
+  .app{display:grid;grid-template-columns:236px 1fr;min-height:100vh}
+
+  /* ---------- sidebar ---------- */
+  aside{background:linear-gradient(180deg,rgba(255,255,255,.015),transparent),var(--panel2);
+        border-right:1px solid var(--line);padding:22px 14px;display:flex;flex-direction:column;
+        position:sticky;top:0;height:100vh}
+  .brand{display:flex;align-items:center;gap:11px;padding:0 6px 20px}
+  .brand .mark{width:34px;height:34px;flex:none}
+  .brand .wm{font-family:var(--mono);font-weight:600;font-size:13px;letter-spacing:.14em;color:var(--text);line-height:1.15}
+  .brand .wm small{display:block;font-size:9.5px;letter-spacing:.22em;color:var(--faint);font-weight:400;margin-top:2px}
+  .navlabel{font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;color:var(--faint);
+            text-transform:uppercase;padding:14px 10px 7px}
+  nav button{display:flex;align-items:center;gap:11px;width:100%;text-align:left;background:transparent;
+             border:0;color:var(--muted);padding:9px 11px;border-radius:var(--r-sm);cursor:pointer;
+             font-family:var(--sans);font-size:13.5px;font-weight:500;position:relative;transition:.15s}
+  nav button svg{width:17px;height:17px;flex:none;opacity:.8}
+  nav button:hover{background:rgba(255,255,255,.03);color:var(--text)}
+  nav button.active{background:var(--azuredim);color:#fff}
+  nav button.active svg{opacity:1;color:var(--azure)}
+  nav button.active::before{content:"";position:absolute;left:-14px;top:7px;bottom:7px;width:3px;
+                            background:var(--azure);border-radius:0 3px 3px 0}
+  .who{margin-top:auto;font-size:12px;color:var(--muted);border-top:1px solid var(--line2);
+       padding:14px 8px 4px;line-height:1.6}
+  .who b{color:var(--text);font-weight:600}
+  .who .mono{font-size:11px}
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block;vertical-align:middle}
+
+  /* ---------- main ---------- */
+  main{padding:26px 32px 60px;max-width:1560px}
+  .topbar{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:26px}
+  h1{font-size:23px;font-weight:600;margin:4px 0 0;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13px;margin-top:3px;max-width:62ch}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+  .btn{font-family:var(--sans);font-weight:500;font-size:13px;border:0;border-radius:var(--r-sm);
+       padding:9px 15px;cursor:pointer;color:#06101f;background:var(--azure);transition:.15s}
+  .btn:hover{background:#75AEFF}
+  .btn:disabled{opacity:.55;cursor:default}
+  .btn.ghost{background:var(--raise);color:var(--text);border:1px solid var(--line)}
+  .btn.ghost:hover{border-color:var(--azure);background:var(--raise)}
+  .btn.sm{padding:5px 11px;font-size:12px}
+  input.search{font-family:var(--mono);background:var(--panel2);border:1px solid var(--line);color:var(--text);
+       padding:9px 13px;border-radius:var(--r-sm);min-width:320px;font-size:12.5px}
+  input.search::placeholder{color:var(--faint)}
+  input.search:focus{outline:none;border-color:var(--azure);background:var(--panel)}
+
+  /* ---------- KPI cards ---------- */
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:13px;margin-bottom:24px}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+        border-radius:var(--r);padding:15px 17px;position:relative;overflow:hidden}
+  .card::after{content:"";position:absolute;inset:0 0 auto;height:2px;background:var(--line)}
+  .card .k{font-family:var(--mono);color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.13em}
+  .card .v{font-family:var(--mono);font-size:30px;font-weight:600;margin-top:9px;line-height:1;letter-spacing:-.02em}
+  .card .v small{font-family:var(--sans);font-size:12px;font-weight:400;color:var(--muted);letter-spacing:0}
+  .card--alert::after{background:var(--alert)} .card--alert .v{color:#FF8893}
+  .card--warn::after{background:var(--warn)} .card--warn .v{color:#FBC56B}
+  .card--azure::after{background:var(--azure)} .card--azure .v{color:#8FBEFF}
+
+  /* ---------- chips ---------- */
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+  .chip{font-family:var(--mono);background:var(--panel2);border:1px solid var(--line);color:var(--muted);
+        padding:6px 12px;border-radius:7px;cursor:pointer;font-size:11.5px;display:flex;gap:8px;align-items:center;transition:.15s}
+  .chip:hover{color:var(--text);border-color:var(--line)}
+  .chip.active{border-color:var(--azure);color:#fff;background:var(--azuredim)}
+  .chip .n{background:var(--ink);border-radius:5px;padding:1px 7px;font-size:10.5px;color:var(--muted)}
+  .chip.active .n{color:var(--azure)}
+
+  /* ---------- panel + table ---------- */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;box-shadow:var(--shadow)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:11px 16px;text-align:left;border-bottom:1px solid var(--line2);white-space:nowrap}
+  thead th{position:sticky;top:0;z-index:2;background:var(--panel2);color:var(--muted);font-weight:500;
+           font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;
+           cursor:pointer;user-select:none}
+  thead th:hover{color:var(--text)}
+  tbody tr{transition:background .12s}
+  tbody tr:hover{background:rgba(91,157,255,.05)}
+  tbody tr:last-child td{border-bottom:0}
+  td.mono,.mono{font-family:var(--mono);font-size:12.5px}
+  td b{font-weight:600}
+
+  .tag{display:inline-flex;align-items:center;font-family:var(--mono);font-size:10px;font-weight:500;
+       letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid transparent}
+  .tag.e-dev{color:#7FE0C8;background:rgba(70,214,180,.10);border-color:rgba(70,214,180,.22)}
+  .tag.e-test{color:#7FD0E0;background:rgba(70,180,214,.10);border-color:rgba(70,180,214,.22)}
+  .tag.e-qa{color:#93C0FF;background:rgba(91,157,255,.12);border-color:rgba(91,157,255,.24)}
+  .tag.e-stage{color:#F4C977;background:rgba(242,181,61,.10);border-color:rgba(242,181,61,.22)}
+  .tag.e-prod{color:#FF9BA4;background:rgba(255,92,108,.10);border-color:rgba(255,92,108,.26)}
+  .tag.e-sandbox{color:#BCA8FF;background:rgba(169,139,255,.10);border-color:rgba(169,139,255,.22)}
+  .tag.e-other{color:var(--muted);background:rgba(255,255,255,.04);border-color:var(--line)}
+
+  .pill{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--muted);
+        border:1px solid var(--line);border-radius:5px;padding:1px 7px;white-space:nowrap}
+  .pill.rbac{color:#7FE0C8;border-color:rgba(70,214,180,.3)}
+  .pill.policy{color:#F4C977;border-color:rgba(242,181,61,.3)}
+  .sev{font-family:var(--mono);font-size:10px;letter-spacing:.1em;padding:2px 8px;border-radius:5px;border:1px solid}
+  .sev.expired{color:#FF8893;background:rgba(255,92,108,.12);border-color:rgba(255,92,108,.32)}
+  .sev.urgent{color:#FBC56B;background:rgba(242,181,61,.12);border-color:rgba(242,181,61,.32)}
+  .sev.ok{color:var(--muted);border-color:var(--line);background:transparent}
+
+  .iconbtn{font-family:var(--mono);background:var(--raise);border:1px solid var(--line);color:var(--muted);
+           border-radius:6px;padding:4px 9px;cursor:pointer;font-size:11.5px;transition:.15s}
+  .iconbtn:hover{color:#fff;border-color:var(--azure)}
+  .empty{padding:48px 24px;text-align:center;color:var(--muted)}
+  .scroll{max-height:calc(100vh - 380px);overflow:auto}
+  .scroll::-webkit-scrollbar{width:10px;height:10px}
+  .scroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;border:2px solid var(--panel)}
+  .tablenote{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:10px}
+
+  /* ---------- signature: expiry horizon ---------- */
+  .horizon{padding:18px 20px;margin-bottom:22px}
+  .hz-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px}
+  .hz-body{display:flex;gap:12px;height:104px}
+  .hz-expired{position:relative;width:118px;flex:none;border:1px solid rgba(255,92,108,.28);
+              background:linear-gradient(180deg,rgba(255,92,108,.12),rgba(255,92,108,.02));
+              border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}
+  .hz-expired-n{font-family:var(--mono);font-size:30px;font-weight:600;color:#FF8893;line-height:1}
+  .hz-expired-l{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;color:#FF8893;margin-top:3px}
+  .hz-axis{position:relative;flex:1;border:1px solid var(--line);border-radius:10px;
+           background:linear-gradient(180deg,rgba(255,255,255,.015),transparent);overflow:hidden}
+  .hz-grid{position:absolute;top:0;bottom:0;border-left:1px dashed var(--line);}
+  .hz-grid:first-of-type{border-left-color:rgba(91,157,255,.35)}
+  .hz-grid span{position:absolute;bottom:7px;left:6px;font-family:var(--mono);font-size:9.5px;color:var(--faint);white-space:nowrap}
+  .hz-tick{position:absolute;top:12px;bottom:26px;width:2px;border-radius:2px;background:var(--ok);
+           transform:translateX(-1px);opacity:.9}
+  .hz-tick.warn{background:var(--warn)} .hz-tick.alert{background:var(--alert)}
+  .hz-tick:hover{opacity:1;width:3px;box-shadow:0 0 8px currentColor}
+  .hz-expired .hz-tick{top:auto;bottom:9px;height:16px;opacity:.7}
+  .hz-legend{display:flex;gap:16px;align-items:center}
+  .hz-legend span{font-family:var(--mono);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:5px}
+  .hz-legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
+
+  /* ---------- segmented + window ---------- */
+  .seg{display:inline-flex;gap:4px;background:var(--panel2);border:1px solid var(--line);
+       border-radius:var(--r-sm);padding:3px}
+  .seg button{font-family:var(--mono);background:transparent;border:0;color:var(--muted);padding:6px 12px;
+              border-radius:6px;cursor:pointer;font-size:12px;transition:.15s}
+  .seg button:hover{color:var(--text)}
+  .seg button.active{background:var(--raise);color:#fff;box-shadow:0 1px 0 rgba(0,0,0,.4)}
+
+  /* ---------- drawer ---------- */
+  .overlay{position:fixed;inset:0;background:rgba(5,8,14,.6);backdrop-filter:blur(2px);opacity:0;
+           pointer-events:none;transition:.25s;z-index:30}
+  .overlay.show{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:0;height:100vh;width:100vw;max-width:100vw;background:var(--panel);
+          border-left:1px solid var(--line);box-shadow:-30px 0 80px -30px rgba(0,0,0,.9);
+          transform:translateX(100%);transition:transform .28s cubic-bezier(.2,.7,.2,1);z-index:40;
+          display:flex;flex-direction:column}
+  .drawer.open{transform:translateX(0)}
+  .drawer header{padding:20px 22px;border-bottom:1px solid var(--line);display:flex;
+                 justify-content:space-between;align-items:flex-start;gap:14px}
+  .drawer header .dt{font-family:var(--mono);font-size:16px;font-weight:600;word-break:break-all}
+  .drawer .body{padding:18px 22px;overflow:auto}
+  .kvitem{border-bottom:1px solid var(--line2)}
+  .kvitem:last-child{border-bottom:0}
+  .kvitem.sel{background:rgba(91,157,255,.06);margin:0 -22px;padding:0 22px}
+  .kvline{display:flex;align-items:center;gap:10px;padding:10px 0}
+  .kvline .nm{flex:1 1 auto;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:12.5px}
+  .kvline .meta{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+  .kvline input[type=checkbox]{flex:0 0 auto}
+  .revealed{padding:0 0 12px;display:flex;align-items:flex-start;gap:8px}
+  .revealed code.val{display:block;flex:1;min-width:0;background:var(--ink);border:1px solid var(--line);
+                     border-radius:6px;padding:8px 10px;max-height:120px;overflow:auto}
+  .cmd{background:var(--ink);border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;
+       margin:8px 0;font-family:var(--mono);font-size:11.5px;color:#A9D2FF;display:flex;justify-content:space-between;gap:10px;align-items:center}
+  .secthead{font-family:var(--mono);margin:24px 0 6px;color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.16em}
+  .loadval{font-family:var(--mono);font-size:11px;color:var(--azure);cursor:pointer;background:none;border:0;text-decoration:underline}
+  code.val{font-family:var(--mono);user-select:all;color:#A9D2FF;font-size:11.5px;word-break:break-all}
+  /* drawer edit + batch */
+  .dtools{display:flex;align-items:center;gap:12px;margin-top:14px}
+  .dtools .search{min-width:0;flex:1;padding:8px 11px}
+  .selall{font-family:var(--mono);font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+  input[type=checkbox]{accent-color:var(--azure);width:14px;height:14px;cursor:pointer}
+  .batchbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding:10px 12px;
+            background:var(--azuredim);border:1px solid rgba(91,157,255,.4);border-radius:var(--r-sm)}
+  .batchbar .bn{font-family:var(--mono);font-size:12px;color:#cfe2ff;margin-right:2px}
+  .batchbar input[type=date]{font-family:var(--mono);font-size:12px;background:var(--ink);border:1px solid var(--line);
+            color:var(--text);border-radius:6px;padding:5px 8px;color-scheme:dark}
+  .editor{margin:0 -22px;padding:14px 22px;background:var(--panel2);border-top:1px solid var(--line2)}
+  /* create panel */
+  .createp{margin-top:12px;padding:16px;background:var(--panel2);border:1px solid var(--azure);border-radius:var(--r-sm)}
+  .createp h4{margin:0 0 12px;font-family:var(--mono);font-size:12px;color:#cfe2ff;font-weight:500;letter-spacing:.04em}
+  .createp .fld{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .createp label{font-family:var(--mono);font-size:11px;color:var(--muted);width:72px;flex:none}
+  .createp input[type=text],.createp input[type=date],.createp textarea{font-family:var(--mono);font-size:12px;
+    background:var(--ink);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:8px 10px;flex:1;width:100%;color-scheme:dark}
+  .createp textarea{min-height:120px;resize:vertical;line-height:1.6}
+  .createp .actions{display:flex;gap:8px;align-items:center;margin-top:6px}
+  .newbtns{display:flex;gap:6px;margin-left:auto}
+  .editor .fld{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .editor label{font-family:var(--mono);font-size:11px;color:var(--muted);width:78px;flex:none}
+  .editor input[type=text],.editor input[type=date]{font-family:var(--mono);font-size:12px;background:var(--ink);
+            border:1px solid var(--line);color:var(--text);border-radius:6px;padding:7px 9px;flex:1;color-scheme:dark}
+  .editor input[type=date],.createp input[type=date]{flex:0 0 auto;width:200px}
+  .editor .hint{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .toggle{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:12px;color:var(--text);cursor:pointer}
+
+  /* ---------- misc ---------- */
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
+         background:var(--raise);border:1px solid var(--azure);color:#fff;padding:10px 18px;
+         border-radius:var(--r-sm);opacity:0;transition:.25s;z-index:60;font-size:13px}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .banner{background:linear-gradient(180deg,rgba(255,92,108,.14),rgba(255,92,108,.04));
+          border:1px solid rgba(255,92,108,.4);color:#FFC4C9;padding:13px 16px;border-radius:var(--r);
+          margin-bottom:18px;display:none;font-size:13px}
+  .banner.show{display:block}
+  .banner code{font-family:var(--mono);background:rgba(0,0,0,.3);padding:1px 6px;border-radius:4px;color:#fff}
+  .spin{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--azure);border-radius:50%;
+        display:inline-block;animation:spin .7s linear infinite;vertical-align:-4px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .progress{width:64%;max-width:380px;height:6px;background:var(--ink);border:1px solid var(--line);
+            border-radius:999px;margin:16px auto 0;overflow:hidden}
+  .progress .bar{height:100%;background:linear-gradient(90deg,var(--azure),var(--ok));border-radius:999px;transition:width .4s}
+
+  @media (max-width:900px){
+    .app{grid-template-columns:1fr}
+    aside{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}
+    aside nav{display:flex;gap:4px;flex-wrap:wrap} .navlabel{display:none} .who{display:none}
+    main{padding:20px}
+    input.search{min-width:180px}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 34 34" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="1.5" y="1.5" width="31" height="31" rx="8" fill="#0E141F" stroke="#2A3954"/>
+        <rect x="1.5" y="1.5" width="31" height="31" rx="8" stroke="url(#g)" stroke-opacity=".6"/>
+        <circle cx="17" cy="15" r="4.4" stroke="#5B9DFF" stroke-width="1.8"/>
+        <path d="M17 19.2V24" stroke="#5B9DFF" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M14.4 24h5.2" stroke="#46D6B4" stroke-width="1.8" stroke-linecap="round"/>
+        <defs><linearGradient id="g" x1="0" y1="0" x2="34" y2="34">
+          <stop stop-color="#5B9DFF"/><stop offset="1" stop-color="#46D6B4"/></linearGradient></defs>
+      </svg>
+      <div class="wm">KEYVAULT<small>OPS CONSOLE</small></div>
+    </div>
+    <div class="navlabel">Console</div>
+    <nav>
+      <button data-view="overview" class="active">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Overview</button>
+      <button data-view="subscriptions">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+        Subscriptions</button>
+      <button data-view="vaults">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+        Key Vaults</button>
+      <button data-view="expiring">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+        Expiry</button>
+    </nav>
+    <div class="who" id="who"><span class="spin"></span> connecting…</div>
+  </aside>
+
+  <main>
+    <div class="banner" id="banner"></div>
+
+    <div class="topbar">
+      <div>
+        <div class="eyebrow" id="eyebrow">Overview</div>
+        <h1 id="title">Overview</h1>
+        <div class="sub" id="subtitle">Live view of your Azure access via the local az CLI</div>
+      </div>
+      <div class="row">
+        <input class="search hide" id="search" placeholder="search vault · resource group · service…" />
+        <button class="btn ghost" id="refresh">↻ Refresh</button>
+      </div>
+    </div>
+
+    <!-- OVERVIEW -->
+    <section id="view-overview">
+      <div class="cards" id="ovCards"></div>
+      <div class="panel">
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Subscription</th><th>Env</th><th>State</th><th class="right">Key Vaults</th><th>Subscription ID</th></tr></thead>
+            <tbody id="ovSubs"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- SUBSCRIPTIONS -->
+    <section id="view-subscriptions" class="hide">
+      <div class="panel">
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Name</th><th>Env</th><th>State</th><th>Active</th><th class="right">Vaults</th><th>Subscription ID</th><th></th></tr></thead>
+            <tbody id="subsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- VAULTS -->
+    <section id="view-vaults" class="hide">
+      <div class="chips" id="envChips"></div>
+      <div class="panel">
+        <div class="scroll">
+          <table>
+            <thead><tr>
+              <th data-sort="name">Vault ▾</th><th data-sort="env">Env</th>
+              <th data-sort="service">Service</th><th data-sort="resourceGroup">Resource Group</th>
+              <th data-sort="sku">SKU</th><th>Auth</th><th class="right">Actions</th>
+            </tr></thead>
+            <tbody id="vaultsBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="tablenote" id="vaultCount"></div>
+    </section>
+
+    <!-- EXPIRING -->
+    <section id="view-expiring" class="hide">
+      <div class="row" style="margin-bottom:18px;justify-content:space-between">
+        <div class="row">
+          <span class="eyebrow">Window</span>
+          <div class="seg" id="expWindow">
+            <button data-d="7">7d</button>
+            <button data-d="30" class="active">30d</button>
+            <button data-d="60">60d</button>
+            <button data-d="90">90d</button>
+            <button data-d="365">1y</button>
+          </div>
+          <button class="btn" id="expScan">⟳ Scan vaults</button>
+        </div>
+        <span class="tablenote" id="expMeta"></span>
+      </div>
+
+      <div class="panel horizon hide" id="expHorizon"></div>
+      <div class="cards" id="expCards"></div>
+
+      <div class="panel">
+        <div class="scroll">
+          <table>
+            <thead><tr>
+              <th data-esort="daysLeft">Expires in ▾</th><th data-esort="expires">Expiry date</th>
+              <th data-esort="type">Type</th><th data-esort="name">Item</th>
+              <th data-esort="vault">Vault</th><th data-esort="env">Env</th>
+              <th>Status</th><th class="right">Actions</th>
+            </tr></thead>
+            <tbody id="expBody"><tr><td colspan="8" class="empty">Press <b>Scan vaults</b> to check expiry across every vault you can read.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="tablenote" id="expTableNote"></div>
+    </section>
+  </main>
+</div>
+
+<!-- Drawer -->
+<div class="overlay" id="overlay"></div>
+<div class="drawer" id="drawer">
+  <header>
+    <div>
+      <div class="dt" id="dTitle">Vault</div>
+      <div class="mono muted" id="dSub" style="font-size:11.5px;margin-top:5px;word-break:break-all"></div>
+    </div>
+    <button class="iconbtn" id="dClose">✕ Close</button>
+  </header>
+  <div class="body">
+    <div class="seg" id="dSeg" style="width:100%;display:flex">
+      <button data-kind="secrets" class="active" style="flex:1">Secrets</button>
+      <button data-kind="keys" style="flex:1">Keys</button>
+      <button data-kind="certificates" style="flex:1">Certificates</button>
+    </div>
+    <div class="dtools" id="dTools">
+      <input class="search" id="dFilter" placeholder="filter by name…" autocomplete="off" />
+      <label class="selall"><input type="checkbox" id="dSelAll" /> select all</label>
+      <span class="faint mono" id="dCount"></span>
+      <span class="newbtns" id="dNewBtns">
+        <button class="btn sm" id="dNew">+ New</button>
+        <button class="btn sm ghost" id="dNewBatch">+ Batch</button>
+      </span>
+    </div>
+    <div class="createp hide" id="dCreate"></div>
+    <div class="batchbar hide" id="dBatch"></div>
+    <div id="dContent" style="margin-top:12px"><div class="empty"><span class="spin"></span></div></div>
+    <div class="secthead">CLI commands</div>
+    <div id="dCmds"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (p, opts) => { const r = await fetch(p, opts); return r.json(); };
+let STATE = { vaults: [], subs: [], account: null, env: 'all', q: '', sort: 'name', dir: 1, drawerVault: null, kind: 'secrets' };
+let CFG = { envRules: null, title: null };   // optional operator config from /api/config
+const SUBMETA = {};
+
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1600); }
+function copy(text){ navigator.clipboard.writeText(text).then(()=>toast('Copied to clipboard')); }
+function banner(msg){ const b=$('#banner'); if(!msg){b.classList.remove('show');return;} b.innerHTML=msg; b.classList.add('show'); }
+function envOf(id){ return (SUBMETA[id]&&SUBMETA[id].env)||'?'; }
+function subName(id){ return (SUBMETA[id]&&SUBMETA[id].name)||id; }
+
+// ---------- bootstrap ----------
+async function boot(){
+  const cfg = await api('/api/config'); if(cfg.ok){ CFG = {...CFG, ...cfg.data};
+    if(CFG.title){ document.title = CFG.title; const wm=document.querySelector('.brand .wm'); if(wm) wm.firstChild.textContent = CFG.title; } }
+  const acc = await api('/api/account');
+  if(!acc.ok){
+    $('#who').innerHTML = '<span class="dot" style="background:var(--alert)"></span> not signed in';
+    banner('Azure CLI is not signed in. Run <code>az login</code> in your terminal, then press Refresh.');
+    return;
+  }
+  STATE.account = acc.data;
+  $('#who').innerHTML = `<span class="dot" style="background:var(--ok)"></span> <b>${acc.data.user.name}</b><br><span class="mono">${acc.data.name}</span><br><span class="mono faint">tenant ${(acc.data.tenantId||'').slice(0,8)}…</span>`;
+  banner('');
+  await loadSubs();      // populate the subscription→env map first
+  await loadVaults();    // …so vault/expiry rows resolve their environment
+}
+
+async function loadSubs(){
+  const r = await api('/api/subscriptions');
+  if(!r.ok) return;
+  STATE.subs = r.data;
+  r.data.forEach(s => SUBMETA[s.id] = { name: s.name, env: envLabel(s.name) });
+  renderOverview(); renderSubs();
+  // If the expiry view rendered before subs arrived, re-resolve its env tags now.
+  if(EXP.scanned){ EXP.items = EXP.items.map(it=>({...it, env: envOf(it.subscriptionId)})); renderExpiring(); }
+}
+// Infer an environment label from a subscription name. Operators can override the
+// matching with AZBO_ENV_RULES (see /api/config); otherwise generic keywords are used.
+function envLabel(name){
+  const n = name || '';
+  if(CFG.envRules){ for(const [pat,label] of CFG.envRules){ try{ if(new RegExp(pat,'i').test(n)) return label; }catch{} } }
+  const s = n.toLowerCase();
+  if(/prod|prd|production|\blive\b/.test(s)) return 'Prod';
+  if(/preprod|pre-prod|stag|stg|\buat\b|accept/.test(s)) return 'Stage';
+  if(/\bqa\b|quality/.test(s)) return 'QA';
+  if(/sandbox|sbx|\bdemo\b/.test(s)) return 'Sandbox';
+  if(/dev|develop/.test(s)) return 'Dev';
+  if(/test|tst|\bint\b|integration|nonprod|non-prod/.test(s)) return 'Test';
+  return '—';
+}
+// Map any env label to one of a fixed set of colour buckets for the tag styling.
+function envClass(env){
+  const s = (env||'').toLowerCase();
+  if(/prod|live/.test(s)) return 'e-prod';
+  if(/stag|uat|preprod/.test(s)) return 'e-stage';
+  if(/qa/.test(s)) return 'e-qa';
+  if(/sandbox|demo/.test(s)) return 'e-sandbox';
+  if(/dev/.test(s)) return 'e-dev';
+  if(/test|int/.test(s)) return 'e-test';
+  return 'e-other';
+}
+
+async function loadVaults(refresh){
+  $('#vaultsBody').innerHTML = '<tr><td colspan="7" class="empty"><span class="spin"></span> querying Resource Graph…</td></tr>';
+  const r = await api('/api/vaults'+(refresh?'?refresh=1':''));
+  if(!r.ok){ $('#vaultsBody').innerHTML = `<tr><td colspan="7" class="empty">${r.error||'failed'}</td></tr>`; return; }
+  STATE.vaults = r.data.map(v => ({...v, env: envOf(v.subscriptionId), service: serviceOf(v.resourceGroup)}));
+  renderOverview(); renderEnvChips(); renderVaults();
+}
+// Best-effort short name from a resource group: drop a leading rg / rg- and trailing index.
+function serviceOf(rg){
+  return rg.replace(/^rg[-_]?/i,'').replace(/[-_]?\d+$/,'') || rg;
+}
+
+// ---------- overview ----------
+function renderOverview(){
+  const envs = {};
+  STATE.vaults.forEach(v => envs[v.env]=(envs[v.env]||0)+1);
+  const namedEnvs = Object.entries(envs).filter(([e])=>e!=='?'&&e!=='—').sort((a,b)=>b[1]-a[1]);
+  const cards = [
+    card('Subscriptions', STATE.subs.length, STATE.subs.filter(s=>s.state==='Enabled').length+' enabled',''),
+    card('Key Vaults', STATE.vaults.length, 'across '+namedEnvs.length+' environment'+(namedEnvs.length!==1?'s':''),'azure'),
+    ...namedEnvs.slice(0,3).map(([e,n])=>card(e, n, 'environment','')),
+  ];
+  $('#ovCards').innerHTML = cards.join('');
+  const counts = {}; STATE.vaults.forEach(v=>counts[v.subscriptionId]=(counts[v.subscriptionId]||0)+1);
+  $('#ovSubs').innerHTML = STATE.subs.map(s=>`<tr>
+     <td><b>${s.name}</b></td><td><span class="tag ${envClass(SUBMETA[s.id].env)}">${SUBMETA[s.id].env}</span></td>
+     <td>${s.state}</td><td class="right mono">${counts[s.id]||0}</td><td class="mono muted">${s.id}</td></tr>`).join('');
+}
+function card(k,v,sub,mod){
+  return `<div class="card ${mod?'card--'+mod:''}"><div class="k">${k}</div><div class="v">${v} <small>${sub}</small></div></div>`;
+}
+
+// ---------- subscriptions ----------
+function renderSubs(){
+  const counts = {}; STATE.vaults.forEach(v=>counts[v.subscriptionId]=(counts[v.subscriptionId]||0)+1);
+  $('#subsBody').innerHTML = STATE.subs.map(s=>`<tr>
+    <td><b>${s.name}</b></td>
+    <td><span class="tag ${envClass(SUBMETA[s.id].env)}">${SUBMETA[s.id].env}</span></td>
+    <td>${s.state}</td>
+    <td>${s.isDefault?'<span class="pill rbac">active</span>':''}</td>
+    <td class="right mono">${counts[s.id]||0}</td>
+    <td class="mono muted">${s.id}</td>
+    <td class="right">${s.isDefault?'':`<button class="btn sm ghost" onclick="setSub('${s.id}')">Switch</button>`}</td>
+  </tr>`).join('');
+}
+async function setSub(id){
+  toast('Switching subscription…');
+  const r = await api('/api/subscription/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({subscription:id})});
+  if(r.ok){ STATE.account=r.data; await loadSubs(); toast('Active subscription set'); } else toast(r.error||'failed');
+}
+
+// ---------- vaults ----------
+function renderEnvChips(){
+  const envs = {}; STATE.vaults.forEach(v=>envs[v.env]=(envs[v.env]||0)+1);
+  const order = ['all',...Object.keys(envs).sort()];
+  $('#envChips').innerHTML = order.map(e=>{
+    const n = e==='all'?STATE.vaults.length:envs[e];
+    return `<div class="chip ${STATE.env===e?'active':''}" onclick="setEnv('${e}')">${e==='all'?'All environments':e}<span class="n">${n}</span></div>`;
+  }).join('');
+}
+function setEnv(e){ STATE.env=e; renderEnvChips(); renderVaults(); }
+
+function filteredVaults(){
+  const q = STATE.q.toLowerCase();
+  let list = STATE.vaults.filter(v =>
+    (STATE.env==='all'||v.env===STATE.env) &&
+    (!q || v.name.toLowerCase().includes(q) || v.resourceGroup.toLowerCase().includes(q) || (v.service||'').toLowerCase().includes(q)));
+  const k = STATE.sort, d = STATE.dir;
+  list.sort((a,b)=>String(a[k]||'').localeCompare(String(b[k]||''))*d);
+  return list;
+}
+function renderVaults(){
+  const list = filteredVaults();
+  $('#vaultCount').textContent = `${list.length} vault${list.length!==1?'s':''} shown`;
+  if(!list.length){ $('#vaultsBody').innerHTML='<tr><td colspan="7" class="empty">No vaults match your filter.</td></tr>'; return; }
+  $('#vaultsBody').innerHTML = list.map(v=>`<tr>
+    <td class="mono"><b>${v.name}</b></td>
+    <td><span class="tag ${envClass(v.env)}">${v.env}</span></td>
+    <td class="muted">${v.service||''}</td>
+    <td class="mono muted">${v.resourceGroup}</td>
+    <td class="mono">${v.sku||'—'}</td>
+    <td>${v.enableRbac==='true'?'<span class="pill rbac">RBAC</span>':'<span class="pill policy">Policy</span>'}</td>
+    <td class="right">
+      <button class="iconbtn" onclick="openVault('${v.name}','${v.subscriptionId}')">Open</button>
+      <button class="iconbtn" onclick="copy('az keyvault secret list --vault-name ${v.name} -o table')">⧉</button>
+    </td></tr>`).join('');
+}
+
+// ---------- drawer ----------
+let DRW = { vault:'', kind:'secrets', items:[], filter:'', sel:new Set() };
+function openVault(name, subId){
+  const v = STATE.vaults.find(x=>x.name===name) || {name, subscriptionId:subId, resourceGroup:'', uri:''};
+  STATE.drawerVault = v; STATE.kind='secrets';
+  DRW = { vault:name, kind:'secrets', items:[], filter:'', sel:new Set() };
+  $('#dFilter').value=''; $('#dSelAll').checked=false;
+  $('#dTitle').textContent = name;
+  $('#dSub').innerHTML = `${subName(subId)} · ${v.resourceGroup||''}${v.uri?' · '+v.uri:''}`;
+  $('#dSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.kind==='secrets'));
+  $('#overlay').classList.add('show'); $('#drawer').classList.add('open');
+  renderCmds(v); loadKind();
+}
+function closeDrawer(){ $('#overlay').classList.remove('show'); $('#drawer').classList.remove('open'); }
+function renderCmds(v){
+  const cmds = [
+    `az keyvault secret list --vault-name ${v.name} -o table`,
+    `az keyvault key list --vault-name ${v.name} -o table`,
+    `az keyvault show --name ${v.name} -o jsonc`,
+  ];
+  $('#dCmds').innerHTML = cmds.map(c=>`<div class="cmd"><span>${c}</span><button class="iconbtn" onclick='copy(${JSON.stringify(c)})'>⧉</button></div>`).join('');
+}
+const isEditable = () => DRW.kind==='secrets' || DRW.kind==='certificates';
+async function loadKind(){
+  const v = STATE.drawerVault; DRW.kind = STATE.kind; DRW.sel.clear();
+  $('#dTools').style.display = '';
+  closeCreate();
+  $('#dNewBtns').style.display = STATE.kind==='secrets' ? '' : 'none';
+  $('#dContent').innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  const r = await api(`/api/vaults/${v.name}/${DRW.kind}`);
+  if(!r.ok){
+    DRW.items=[]; $('#dBatch').classList.add('hide'); $('#dCount').textContent='';
+    let why;
+    if(r.firewall) why = `🚫 This vault's firewall is blocking your network — your current IP isn't allowed. Connect to the corporate VPN and retry.<div class="hint" style="margin-top:8px">${r.error||''}</div>`;
+    else if(r.forbidden) why = `🔒 You can see this vault but have no data-plane permission on its ${DRW.kind}.`;
+    else why = r.error||'failed';
+    $('#dContent').innerHTML = `<div class="empty">${why}</div>`;
+    return;
+  }
+  DRW.items = (r.data||[]).map(item=>({
+    name: item.name || (item.id||'').split('/').pop(),
+    enabled: item.attributes ? item.attributes.enabled!==false : true,
+    expires: item.attributes && item.attributes.expires || null,
+    managed: item.managed===true,   // cert-backed secret — controlled by its certificate
+  }));
+  renderDrawerList();
+}
+function drawerFiltered(){
+  const q = DRW.filter.toLowerCase();
+  return DRW.items.filter(i=>!q || i.name.toLowerCase().includes(q));
+}
+function renderDrawerList(){
+  const list = drawerFiltered();
+  const editable = isEditable();
+  $('#dCount').textContent = `${list.length}${list.length!==DRW.items.length?' / '+DRW.items.length:''} ${DRW.kind}`;
+  $('#dSelAll').parentElement.style.display = editable?'':'none';
+  if(!DRW.items.length){ $('#dContent').innerHTML=`<div class="empty">No ${DRW.kind} in this vault, or none visible to you.</div>`; renderBatchBar(); return; }
+  if(!list.length){ $('#dContent').innerHTML=`<div class="empty">No ${DRW.kind} match “${DRW.filter}”.</div>`; renderBatchBar(); return; }
+  $('#dContent').innerHTML = list.map(i=>{
+    const nm=i.name, sel=DRW.sel.has(nm), lock=i.managed;
+    const check = editable && !lock?`<input type="checkbox" ${sel?'checked':''} onclick="toggleSel('${nm}')">`:'';
+    const pills = `${i.enabled?'':'<span class="pill">disabled</span>'}${i.expires?`<span class="pill">exp ${i.expires.slice(0,10)}</span>`:''}${lock?'<span class="pill" title="managed by a certificate — edit it in the Certificates tab">managed</span>':''}`;
+    const reveal = DRW.kind==='secrets'?`<button class="loadval" onclick="reveal('${nm}')">reveal</button>`:'';
+    const edit = editable && !lock?`<button class="iconbtn" onclick="toggleEdit('${nm}')">Edit</button>`:'';
+    return `<div class="kvitem ${sel?'sel':''}">
+        <div class="kvline">${check}<span class="nm" title="${nm}">${nm}</span><span class="meta">${pills}${reveal}${edit}</span></div>
+        <div class="revealed hide" id="rv-${nm}"></div>
+        <div class="editor hide" id="ed-${nm}"></div>
+      </div>`;
+  }).join('');
+  renderBatchBar();
+}
+function renderBatchBar(){
+  const bar=$('#dBatch'), n=DRW.sel.size;
+  if(!n || !isEditable() || !$('#dCreate').classList.contains('hide')){ bar.classList.add('hide'); return; }
+  bar.classList.remove('hide');
+  const secretOnly = DRW.kind==='secrets'
+    ? `<input type="date" id="batchExp"><button class="iconbtn" onclick="batchApply('expiry')">Set expiry</button>
+       <button class="iconbtn" onclick="batchEditValues()">Edit values…</button>` : '';
+  bar.innerHTML = `<span class="bn">${n} selected</span>
+    <button class="iconbtn" onclick="batchApply('enable')">Enable</button>
+    <button class="iconbtn" onclick="batchApply('disable')">Disable</button>
+    ${secretOnly}
+    <button class="iconbtn" onclick="clearSel()">Clear</button>`;
+}
+// Batch-edit the VALUES of the selected secrets, pre-filled with their current values.
+async function batchEditValues(){
+  const names=[...DRW.sel]; if(!names.length) return;
+  const el=$('#dCreate'); $('#dBatch').classList.add('hide');
+  el.classList.remove('hide');
+  el.innerHTML = `<h4>Edit ${names.length} secret value${names.length!==1?'s':''}</h4><div class="empty"><span class="spin"></span> loading current values…</div>`;
+  const vals = await Promise.all(names.map(n=>
+    api(`/api/vaults/${DRW.vault}/secrets/${n}/value`).then(r=>({n, ok:r.ok, val:r.ok?(r.data.value||''):'', err:r.forbidden?'no read permission':(r.error||'failed')}))));
+  const multiline = vals.filter(v=>v.ok && v.val.includes('\n')).map(v=>v.n);
+  const usable = vals.filter(v=>v.ok && !v.val.includes('\n'));
+  const blocked = vals.filter(v=>!v.ok);
+  const lines = usable.map(v=>`${v.n} = ${v.val}`).join('\n');
+  const notes = [];
+  if(blocked.length) notes.push(`${blocked.length} value(s) couldn't be read and were skipped`);
+  if(multiline.length) notes.push(`${multiline.length} multi-line value(s) skipped — edit those individually`);
+  el.innerHTML = `<h4>Edit ${usable.length} secret value${usable.length!==1?'s':''}</h4>
+    <div class="fld" style="align-items:flex-start"><label>Pairs</label><textarea id="cBatch">${lines.replace(/</g,'&lt;')}</textarea></div>
+    <div class="fld"><label>Expires</label><input type="date" id="cExp"><span class="hint">optional · applied to every saved secret</span></div>
+    <div class="actions"><button class="btn sm" onclick="submitCreate('batch')">Save changes</button>
+      <button class="btn sm ghost" onclick="closeCreate()">Cancel</button>
+      <span class="hint" id="cMsg">${notes.join(' · ')}</span></div>`;
+}
+function toggleSel(nm){ DRW.sel.has(nm)?DRW.sel.delete(nm):DRW.sel.add(nm); renderDrawerList(); }
+function clearSel(){ DRW.sel.clear(); $('#dSelAll').checked=false; renderDrawerList(); }
+function selectAll(on){ DRW.sel.clear(); if(on) drawerFiltered().filter(i=>!i.managed).forEach(i=>DRW.sel.add(i.name)); renderDrawerList(); }
+function openCreate(mode){
+  const el=$('#dCreate'); DRW.sel.clear(); $('#dBatch').classList.add('hide');
+  if(mode==='single'){
+    el.innerHTML = `<h4>Create a secret</h4>
+      <div class="fld"><label>Name</label><input type="text" id="cName" placeholder="my-secret-name" autocomplete="off"></div>
+      <div class="fld"><label>Value</label><input type="text" id="cVal" placeholder="secret value" autocomplete="off"></div>
+      <div class="fld"><label>Expires</label><input type="date" id="cExp"><span class="hint">optional</span></div>
+      <div class="actions"><button class="btn sm" onclick="submitCreate('single')">Create secret</button>
+        <button class="btn sm ghost" onclick="closeCreate()">Cancel</button><span class="hint" id="cMsg"></span></div>`;
+  } else {
+    el.innerHTML = `<h4>Create secrets in batch</h4>
+      <div class="fld" style="align-items:flex-start"><label>Pairs</label>
+        <textarea id="cBatch" placeholder="one per line — name = value&#10;client-id = 1a2b3c&#10;client-secret = s3cr3t&#10;tenant-id: contoso.onmicrosoft.com"></textarea></div>
+      <div class="fld"><label>Expires</label><input type="date" id="cExp"><span class="hint">common expiry for all (optional)</span></div>
+      <div class="actions"><button class="btn sm" onclick="submitCreate('batch')">Create all</button>
+        <button class="btn sm ghost" onclick="closeCreate()">Cancel</button><span class="hint" id="cMsg"></span></div>`;
+  }
+  el.classList.remove('hide');
+}
+function closeCreate(){ const el=$('#dCreate'); if(el){ el.classList.add('hide'); el.innerHTML=''; } renderBatchBar(); }
+async function submitCreate(mode){
+  const msg=$('#cMsg');
+  const expRaw=$('#cExp').value;
+  const expires = expRaw ? new Date(expRaw+'T00:00:00Z').toISOString() : undefined;
+  let items=[];
+  if(mode==='single'){
+    const name=$('#cName').value.trim(), value=$('#cVal').value;
+    if(!/^[A-Za-z0-9-]+$/.test(name)){ msg.textContent='Invalid name — use letters, digits, hyphen'; return; }
+    if(!value.length){ msg.textContent='Value is required'; return; }
+    items=[{name,value}];
+  } else {
+    const lines=$('#cBatch').value.split('\n').map(l=>l.trim()).filter(Boolean);
+    const bad=[];
+    for(const ln of lines){
+      const m=ln.match(/^([^=:]+)[=:]([\s\S]*)$/);
+      const name=m?m[1].trim():'', value=m?m[2].trim():'';
+      if(!m || !/^[A-Za-z0-9-]+$/.test(name) || !value.length){ bad.push(ln); continue; }
+      items.push({name,value});
+    }
+    if(bad.length){ msg.textContent=`${bad.length} invalid line(s) — each must be "name = value" (name: letters/digits/hyphen)`; return; }
+    if(!items.length){ msg.textContent='Add at least one name = value line'; return; }
+  }
+  msg.textContent='creating…';
+  const r=await api(`/api/vaults/${DRW.vault}/secrets-create`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items, expires})});
+  if(!r.ok){ msg.textContent=r.error||'failed'; return; }
+  const ok=r.results.filter(x=>x.ok).length, fail=r.results.length-ok;
+  toast(`Created ${ok} secret${ok!==1?'s':''}${fail?`, ${fail} failed`:''}`);
+  if(fail){ const f=r.results.filter(x=>!x.ok);
+    banner(`Create: ${ok} ok, ${fail} failed (${f.slice(0,3).map(x=>x.name+': '+x.error).join('; ')}${fail>3?'…':''}).`);
+    setTimeout(()=>banner(''),9000); }
+  closeCreate(); setTimeout(loadKind, 350);
+}
+function toggleEdit(nm){
+  const el=$('#ed-'+CSS.escape(nm)); if(!el) return;
+  if(!el.classList.contains('hide')){ el.classList.add('hide'); el.innerHTML=''; return; }
+  const it=DRW.items.find(x=>x.name===nm)||{};
+  const cert = DRW.kind==='certificates';
+  const exp = it.expires?it.expires.slice(0,10):'';
+  el.innerHTML = `
+    <div class="fld"><label>Enabled</label><label class="toggle"><input type="checkbox" id="edEn-${nm}" ${it.enabled?'checked':''}> ${it.enabled?'enabled':'disabled'}</label></div>
+    ${cert
+      ? `<div class="fld"><label>Expires</label><span class="hint">${exp||'—'} · set by the certificate, not editable here</span></div>`
+      : `<div class="fld"><label>Expires</label><input type="date" id="edExp-${nm}" value="${exp}"><button class="iconbtn" onclick="document.getElementById('edExp-${CSS.escape(nm)}').value=''">clear</button></div>
+         <div class="fld"><label>Value</label><input type="text" id="edVal-${nm}" placeholder="loading current value…"></div>
+         <div class="fld"><label></label><span class="hint">current value is pre-filled — saving re-writes only if you change it</span></div>`}
+    <div class="fld"><label></label><button class="btn sm" onclick="saveEdit('${nm}')">Save changes</button>
+      <button class="btn sm ghost" onclick="toggleEdit('${nm}')">Cancel</button>
+      <span class="hint" id="edMsg-${nm}"></span></div>`;
+  el.classList.remove('hide');
+  if(!cert){
+    const vEl=document.getElementById('edVal-'+nm);
+    api(`/api/vaults/${DRW.vault}/secrets/${nm}/value`).then(r=>{
+      const live=document.getElementById('edVal-'+nm); if(!live) return;
+      if(r.ok){ live.value=r.data.value||''; live.dataset.orig=r.data.value||''; live.placeholder='secret value'; }
+      else { live.placeholder = r.forbidden?'no permission to read current value':'could not load value'; }
+    });
+  }
+}
+async function saveEdit(nm){
+  const msg=$('#edMsg-'+CSS.escape(nm)); msg.textContent='saving…';
+  const v=DRW.vault, cert=DRW.kind==='certificates';
+  const enabled = $('#edEn-'+CSS.escape(nm)).checked;
+  let r;
+  if(cert){
+    r = await api(`/api/vaults/${v}/certificates/${nm}`, {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
+  } else {
+    const expEl=$('#edExp-'+CSS.escape(nm)), valEl=$('#edVal-'+CSS.escape(nm));
+    const expires = expEl.value? new Date(expEl.value+'T00:00:00Z').toISOString() : undefined;
+    const value = valEl.value;
+    const orig = valEl.dataset.orig ?? '';
+    const valueChanged = value.length>0 && value!==orig;
+    if(valueChanged){
+      r = await api(`/api/vaults/${v}/secrets/${nm}`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value, enabled, expires})});
+    } else {
+      r = await api(`/api/vaults/${v}/secrets/${nm}`, {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled, expires})});
+    }
+  }
+  if(!r.ok){ msg.textContent = r.forbidden?'🔒 no write permission':(r.error||'failed'); return; }
+  msg.textContent='saved ✓'; toast('Updated '+nm);
+  setTimeout(loadKind, 350);
+}
+async function batchApply(action){
+  const names=[...DRW.sel]; if(!names.length) return;
+  let op, verb;
+  if(action==='enable'){ op={enabled:true}; verb='Enable'; }
+  else if(action==='disable'){ op={enabled:false}; verb='Disable'; }
+  else if(action==='expiry'){
+    const d=$('#batchExp').value; if(!d){ toast('Pick a date first'); return; }
+    op={expires:new Date(d+'T00:00:00Z').toISOString()}; verb='Set expiry '+d+' on';
+  }
+  if(!confirm(`${verb} ${names.length} ${DRW.kind} in ${DRW.vault}?`)) return;
+  const kind = DRW.kind==='certificates'?'certificate':'secret';
+  const items = names.map(n=>({vault:DRW.vault, kind, name:n}));
+  toast('Applying to '+names.length+'…');
+  const r = await api('/api/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op, items})});
+  if(!r.ok){ toast(r.error||'batch failed'); return; }
+  const ok=r.results.filter(x=>x.ok).length, fail=r.results.length-ok;
+  toast(`${ok} updated${fail?`, ${fail} failed`:''}`);
+  if(fail){ const failed=r.results.filter(x=>!x.ok); console.warn('Batch failures:', failed);
+    banner(`Batch: ${ok} updated, ${fail} failed (${failed.slice(0,3).map(f=>f.name+': '+f.error).join('; ')}${fail>3?'…':''}). See console for all.`);
+    setTimeout(()=>banner(''),8000); }
+  DRW.sel.clear(); $('#dSelAll').checked=false;
+  setTimeout(loadKind, 350);
+}
+// Reveal a secret value on its own full-width line below the row (toggles).
+async function reveal(name){
+  const box = document.getElementById('rv-'+name);
+  if(!box) return;
+  if(!box.classList.contains('hide')){ box.classList.add('hide'); box.innerHTML=''; return; }
+  box.classList.remove('hide'); box.innerHTML = '<span class="spin"></span>';
+  const r = await api(`/api/vaults/${DRW.vault}/secrets/${name}/value`);
+  if(!r.ok){ box.innerHTML = `<span class="muted mono">${r.firewall?'🚫 blocked by vault firewall — connect to VPN':r.forbidden?'🔒 no permission':r.error}</span>`; return; }
+  const val = r.data.value || '';
+  box.innerHTML = `<code class="val" title="click to select">${val.replace(/</g,'&lt;')}</code><button class="iconbtn" onclick='copy(${JSON.stringify(val)})'>⧉</button>`;
+}
+
+// ---------- expiring ----------
+let EXP = { days: 30, items: [], stats: null, scannedAt: 0, sort: 'daysLeft', dir: 1, scanned: false, polling: false };
+const ROW_CAP = 500;
+function applyStatus(s){
+  EXP.polling=false; EXP.scanned=true;
+  $('#expScan').disabled=false; $('#expScan').textContent='⟳ Re-scan';
+  EXP.items=(s.items||[]).map(it=>({...it, env: envOf(it.subscriptionId)}));
+  EXP.stats=s.stats; EXP.scannedAt=s.scannedAt;
+  const when = s.scannedAt? new Date(s.scannedAt).toLocaleTimeString():'';
+  $('#expMeta').textContent = s.stats? `${s.stats.readable} readable · ${s.stats.forbidden} denied · ${s.stats.total} vaults · scanned ${when}` : '';
+  renderExpiring();
+}
+// On first visit, reuse the last completed scan if one exists; only scan when there's nothing yet.
+async function enterExpiring(){
+  if(EXP.scanned || EXP.polling) return;
+  const s = await api(`/api/expiring/status?days=${EXP.days}`);
+  if(s.ok && s.running){ EXP.polling=true; pollExpiring(); return; }
+  if(s.ok && s.scannedAt){ applyStatus(s); return; }
+  scanExpiring();
+}
+async function scanExpiring(){
+  if(EXP.polling) return;
+  $('#expScan').disabled = true;
+  const start = await api('/api/expiring/scan', {method:'POST'});
+  if(!start.ok){ $('#expBody').innerHTML = `<tr><td colspan="8" class="empty">${start.needLogin?'Not signed in — run az login, then Refresh.':(start.error||'failed')}</td></tr>`; $('#expScan').disabled=false; return; }
+  EXP.polling = true;
+  pollExpiring();
+}
+async function pollExpiring(){
+  const s = await api(`/api/expiring/status?days=${EXP.days}`);
+  if(!s.ok){ EXP.polling=false; $('#expScan').disabled=false; return; }
+  if(s.running){
+    const pct = s.total? Math.round(s.done/s.total*100):0;
+    $('#expScan').textContent = `Scanning ${s.done}/${s.total}`;
+    $('#expHorizon').classList.add('hide');
+    $('#expBody').innerHTML = `<tr><td colspan="8" class="empty">
+      <div class="spin"></div>
+      <div style="margin-top:16px">Inspecting <b>${s.done}</b> of <b>${s.total}</b> vaults…</div>
+      <div class="progress"><div class="bar" style="width:${pct}%"></div></div>
+      <div class="faint mono" style="margin-top:10px;font-size:11px">Read-denied vaults skip instantly · only your readable vaults are inspected</div>
+    </td></tr>`;
+    setTimeout(pollExpiring, 1500);
+    return;
+  }
+  EXP.polling = false; EXP.scanned = true;
+  $('#expScan').disabled = false; $('#expScan').textContent = '⟳ Re-scan';
+  EXP.items = (s.items||[]).map(it=>({...it, env: envOf(it.subscriptionId)}));
+  EXP.stats = s.stats; EXP.scannedAt = s.scannedAt;
+  const when = s.scannedAt? new Date(s.scannedAt).toLocaleTimeString():'';
+  $('#expMeta').textContent = s.stats? `${s.stats.readable} readable · ${s.stats.forbidden} denied · ${s.stats.total} vaults · scanned ${when}` : '';
+  renderExpiring();
+}
+function expSorted(){
+  const k=EXP.sort, d=EXP.dir;
+  return [...EXP.items].sort((a,b)=>{const av=k==='daysLeft'?a[k]:String(a[k]||''),bv=k==='daysLeft'?b[k]:String(b[k]||'');return (av>bv?1:av<bv?-1:0)*d;});
+}
+function renderExpiring(){
+  const items = EXP.items;
+  const expired = items.filter(i=>i.daysLeft<0).length;
+  const soon = items.filter(i=>i.daysLeft>=0&&i.daysLeft<=7).length;
+  const certs = items.filter(i=>i.type==='certificate').length;
+  $('#expCards').innerHTML = [
+    card('Flagged', items.length, `within ${EXP.days} days`, items.length?'':''),
+    card('Expired', expired, 'needs rotation', expired?'alert':''),
+    card('≤ 7 days', soon, 'urgent', soon?'warn':''),
+    card('Certificates', certs, (items.length-certs)+' secrets', 'azure'),
+  ].join('');
+  renderHorizon();
+  if(!items.length){
+    $('#expHorizon').classList.add('hide');
+    $('#expTableNote').textContent='';
+    $('#expBody').innerHTML = `<tr><td colspan="8" class="empty">✓ Nothing expiring within ${EXP.days} days across the ${EXP.stats?EXP.stats.readable:0} vault(s) you can read.</td></tr>`;
+    return;
+  }
+  const list = expSorted();
+  const shown = list.slice(0, ROW_CAP);
+  $('#expTableNote').textContent = list.length>ROW_CAP ? `Showing first ${ROW_CAP} of ${list.length} — narrow the window or sort to see the rest.` : '';
+  $('#expBody').innerHTML = shown.map(i=>{
+    const sev = i.daysLeft<0?'bad':i.daysLeft<=7?'bad':i.daysLeft<=30?'warn':'good';
+    const label = i.daysLeft<0?`expired ${-i.daysLeft}d ago`:i.daysLeft===0?'today':`${i.daysLeft} days`;
+    const status = i.daysLeft<0?'<span class="sev expired">EXPIRED</span>':
+                   i.daysLeft<=7?'<span class="sev urgent">URGENT</span>':
+                   '<span class="sev ok">OK</span>';
+    return `<tr>
+      <td><span class="dot" style="background:var(--${sev})"></span> <b>${label}</b></td>
+      <td class="mono muted">${(i.expires||'').slice(0,10)}</td>
+      <td class="mono">${i.type==='certificate'?'cert':'secret'}</td>
+      <td class="mono">${i.name}${i.enabled?'':' <span class="pill">disabled</span>'}</td>
+      <td class="mono muted">${i.vault}</td>
+      <td><span class="tag ${envClass(i.env)}">${i.env}</span></td>
+      <td>${status}</td>
+      <td class="right"><button class="iconbtn" onclick="openVault('${i.vault}','${i.subscriptionId}')">Open</button>
+        <button class="iconbtn" onclick="copy('az keyvault ${i.type==='certificate'?'certificate':'secret'} show --vault-name ${i.vault} --name ${i.name} -o jsonc')">⧉</button></td>
+    </tr>`;
+  }).join('');
+}
+// Signature: expiry horizon — a time axis where every item is a temperature-colored tick.
+function renderHorizon(){
+  const el = $('#expHorizon');
+  const items = EXP.items;
+  if(!items.length){ el.classList.add('hide'); el.innerHTML=''; return; }
+  el.classList.remove('hide');
+  const days = EXP.days;
+  const expired = items.filter(i=>i.daysLeft<0);
+  const future = items.filter(i=>i.daysLeft>=0);
+  const markSets = {7:[0,1,3,5,7],30:[0,7,14,21,30],60:[0,15,30,45,60],90:[0,30,60,90],365:[0,90,180,270,365]};
+  const marks = markSets[days] || [0, days];
+  const grid = marks.map(m=>`<div class="hz-grid" style="left:${Math.min(99.5,m/days*100)}%"><span>${m===0?'now':'+'+m+'d'}</span></div>`).join('');
+  const ticks = future.map(i=>{
+    const left = Math.min(99.6, Math.max(.4, i.daysLeft/days*100));
+    const sev = i.daysLeft<=7?'alert':i.daysLeft<=30?'warn':'ok';
+    return `<div class="hz-tick ${sev}" style="left:${left}%" title="${i.name} · ${i.vault} · in ${i.daysLeft}d"></div>`;
+  }).join('');
+  const expTicks = expired.slice(0,140).map((i,idx,arr)=>{
+    const left = arr.length>1 ? 8 + (idx/(arr.length-1))*84 : 50;
+    return `<div class="hz-tick alert" style="left:${left}%" title="${i.name} · ${i.vault} · expired ${-i.daysLeft}d ago"></div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="hz-head">
+      <span class="eyebrow">Expiry horizon · next ${days} days</span>
+      <div class="hz-legend">
+        <span><i style="background:var(--alert)"></i>≤7d / expired</span>
+        <span><i style="background:var(--warn)"></i>≤30d</span>
+        <span><i style="background:var(--ok)"></i>beyond</span>
+      </div>
+    </div>
+    <div class="hz-body">
+      <div class="hz-expired" title="${expired.length} already expired">
+        <div class="hz-expired-n">${expired.length}</div>
+        <div class="hz-expired-l">EXPIRED</div>
+        ${expTicks}
+      </div>
+      <div class="hz-axis">${grid}${ticks}</div>
+    </div>`;
+}
+
+// ---------- view switching ----------
+const META = {
+  overview:['Overview','Overview','Accounts, subscriptions and vault inventory — read live from your az session.'],
+  subscriptions:['Subscriptions','Subscriptions','Switch the subscription the az CLI is currently pointed at.'],
+  vaults:['Key Vaults','Key Vaults','Browse every readable vault. Open one to inspect its secrets, keys and certificates.'],
+  expiring:['Expiry','Expiring soon','Secrets and certificates that are expired or approaching expiry, across every vault you can read.'],
+};
+function show(view){
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+  ['overview','subscriptions','vaults','expiring'].forEach(v=>$('#view-'+v).classList.toggle('hide',v!==view));
+  $('#search').classList.toggle('hide', view!=='vaults');
+  $('#eyebrow').textContent = META[view][0];
+  $('#title').textContent = META[view][1];
+  $('#subtitle').textContent = META[view][2];
+  if(view==='expiring' && !EXP.scanned) enterExpiring();
+}
+
+// ---------- events ----------
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.view));
+$('#refresh').onclick=()=>{ toast('Refreshing…'); boot(); loadVaults(true); };
+$('#search').oninput=e=>{ STATE.q=e.target.value; renderVaults(); };
+$('#dClose').onclick=closeDrawer; $('#overlay').onclick=closeDrawer;
+$('#dSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{ STATE.kind=b.dataset.kind; $('#dFilter').value=''; DRW.filter=''; $('#dSelAll').checked=false; $('#dSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b)); loadKind(); });
+$('#dFilter').oninput=e=>{ DRW.filter=e.target.value; renderDrawerList(); };
+$('#dSelAll').onchange=e=>selectAll(e.target.checked);
+$('#dNew').onclick=()=>openCreate('single');
+$('#dNewBatch').onclick=()=>openCreate('batch');
+document.querySelectorAll('th[data-sort]').forEach(th=>th.onclick=()=>{ const k=th.dataset.sort; STATE.dir = STATE.sort===k?-STATE.dir:1; STATE.sort=k; renderVaults(); });
+document.querySelectorAll('th[data-esort]').forEach(th=>th.onclick=()=>{ const k=th.dataset.esort; EXP.dir = EXP.sort===k?-EXP.dir:1; EXP.sort=k; renderExpiring(); });
+$('#expWindow').querySelectorAll('button').forEach(b=>b.onclick=async()=>{ $('#expWindow').querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b)); EXP.days=+b.dataset.d; if(EXP.scanned && !EXP.polling){ const s=await api(`/api/expiring/status?days=${EXP.days}`); if(s.ok){ EXP.items=(s.items||[]).map(it=>({...it,env:envOf(it.subscriptionId)})); renderExpiring(); } } });
+$('#expScan').onclick=()=>scanExpiring(true);
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeDrawer(); });
+
+const initView = new URLSearchParams(location.search).get('view');
+if(initView && META[initView]) show(initView);
+boot();
+</script>
+</body>
+</html>
