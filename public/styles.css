@@ -53,6 +53,7 @@
   .who b{color:var(--text);font-weight:600}
   .who .mono{font-size:11px}
   .dot{width:7px;height:7px;border-radius:50%;display:inline-block;vertical-align:middle}
+  .ver{font-size:10px;letter-spacing:.04em;padding:8px 8px 2px}
 
   /* ---------- main ---------- */
   h1{font-size:23px;font-weight:600;margin:4px 0 0;letter-spacing:-.01em}

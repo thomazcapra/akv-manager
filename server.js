@@ -532,8 +532,9 @@ const ENV_RULES = (() => {
   try { return process.env.AZBO_ENV_RULES ? JSON.parse(process.env.AZBO_ENV_RULES) : null; }
   catch { console.warn('  AZBO_ENV_RULES is not valid JSON — ignoring.'); return null; }
 })();
+const PKG_VERSION = (() => { try { return require('./package.json').version; } catch { return null; } })();
 app.get('/api/config', (req, res) =>
-  res.json({ ok: true, data: { envRules: ENV_RULES, title: process.env.AZBO_TITLE || null } }));
+  res.json({ ok: true, data: { envRules: ENV_RULES, title: process.env.AZBO_TITLE || null, version: PKG_VERSION } }));
 
 function openBrowser(url) {
   if (process.env.AZBO_NO_OPEN) return;

@@ -64,6 +64,7 @@
         Expiry</button>
     </nav>
     <div class="who" id="who"><span class="spin"></span> connecting…</div>
+    <div class="ver mono faint" id="ver"></div>
   </aside>
 
   <main class="max-w-[1560px] px-8 pt-[26px] pb-[60px] max-[900px]:p-5">
@@ -214,6 +215,7 @@ function subName(id){ return (SUBMETA[id]&&SUBMETA[id].name)||id; }
 async function boot(){
   const cfg = await api('/api/config'); if(cfg.ok){ CFG = {...CFG, ...cfg.data};
     if(CFG.title){ document.title = CFG.title; const wm=document.querySelector('.brand .wm'); if(wm) wm.firstChild.textContent = CFG.title; } }
+  $('#ver').textContent = 'akv-manager v' + (CFG.version || '?');
   const acc = await api('/api/account');
   if(!acc.ok){
     $('#who').innerHTML = '<span class="dot" style="background:var(--alert)"></span> not connected';
