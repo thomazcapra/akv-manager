@@ -1,6 +1,6 @@
 {
   "name": "akv-manager",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Local web console to browse and manage Azure Key Vaults — secrets, keys, certificates, expiry — using your own az login. No credentials are stored.",
   "type": "commonjs",
   "main": "server.js",

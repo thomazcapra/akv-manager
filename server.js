@@ -274,11 +274,20 @@ const VAULT_QUERY =
 async function listVaultsRaw(force) {
   if (!force && vaultCache.data && Date.now() - vaultCache.at < VAULT_TTL) return vaultCache.data;
   const subIds = (await listSubscriptions(force)).map((s) => s.subscriptionId);
-  const out = await armFetch('/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01', {
-    method: 'POST',
-    body: { subscriptions: subIds, query: VAULT_QUERY, options: { resultFormat: 'objectArray', $top: 1000 } },
-  });
-  const data = out.data || [];
+  // Resource Graph returns at most 1000 rows per page; follow $skipToken to get them all.
+  const data = [];
+  let skipToken;
+  for (let page = 0; page < 100; page++) {            // hard stop at 100k vaults — a safety bound
+    const options = { resultFormat: 'objectArray', $top: 1000 };
+    if (skipToken) options.$skipToken = skipToken;
+    const out = await armFetch('/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01', {
+      method: 'POST',
+      body: { subscriptions: subIds, query: VAULT_QUERY, options },
+    });
+    if (out.data) data.push(...out.data);
+    skipToken = out.$skipToken;
+    if (!skipToken) break;
+  }
   vaultCache = { at: Date.now(), data };
   return data;
 }
@@ -535,6 +544,15 @@ app.patch('/api/vaults/:name/certificates/:cert', (req, res) => {
   send(res, kvWrite(name, 'PATCH', `/certificates/${cert}?api-version=${KV_API}`, { attributes: attrs }));
 });
 
+// Turn a write failure into a precise, actionable reason. A 403 from Key Vault is
+// either a network/firewall block (fix: VPN) or a real data-plane permission gap
+// (fix: grant Set on secrets) — never conflate the two as a bare "forbidden".
+function writeReason(e) {
+  if (e.firewall) return 'blocked by the vault firewall — your IP is not allowed (connect to the corporate VPN)';
+  if (e.forbidden) return 'no write permission — your identity can read but not Set secrets on this vault';
+  return e.message || 'failed';
+}
+
 // Create one or many secrets in a vault. items: [{name, value}], optional common expires.
 app.post('/api/vaults/:name/secrets-create', async (req, res) => {
   const { name } = req.params;
@@ -552,7 +570,7 @@ app.post('/api/vaults/:name/secrets-create', async (req, res) => {
       if (Object.keys(attrs).length) body.attributes = attrs;
       await kvWrite(name, 'PUT', `/secrets/${it.name}?api-version=${KV_API}`, body);
       return { ...r, ok: true };
-    } catch (e) { return { ...r, ok: false, error: e.forbidden ? 'forbidden' : (e.message || 'failed') }; }
+    } catch (e) { return { ...r, ok: false, error: writeReason(e), firewall: !!e.firewall, forbidden: !!e.forbidden }; }
   }, 10);
   res.json({ ok: true, results });
 });
@@ -577,7 +595,7 @@ app.post('/api/batch', async (req, res) => {
         await kvWrite(it.vault, 'PATCH', `/secrets/${it.name}?api-version=${KV_API}`, { attributes: attrs });
       }
       return { ...r, ok: true };
-    } catch (e) { return { ...r, ok: false, error: e.forbidden ? 'forbidden' : (e.message || 'failed') }; }
+    } catch (e) { return { ...r, ok: false, error: writeReason(e), firewall: !!e.firewall, forbidden: !!e.forbidden }; }
   }, 12);
   res.json({ ok: true, results });
 });
