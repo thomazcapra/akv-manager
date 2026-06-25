@@ -268,7 +268,8 @@ const VAULT_QUERY =
   "| project name, resourceGroup, subscriptionId, location, " +
   "sku=tostring(properties.sku.name), " +
   "enableRbac=tostring(properties.enableRbacAuthorization), " +
-  "uri=tostring(properties.vaultUri) | order by name asc";
+  "uri=tostring(properties.vaultUri), tags " +
+  "| order by name asc";
 
 async function listVaultsRaw(force) {
   if (!force && vaultCache.data && Date.now() - vaultCache.at < VAULT_TTL) return vaultCache.data;
@@ -290,6 +291,65 @@ app.get('/api/vaults', async (req, res) => {
     res.status(err.needLogin ? 401 : 500)
        .json({ ok: false, error: err.stderr || err.message, needLogin: !!err.needLogin });
   }
+});
+
+// Find a vault's management-plane coordinates (sub + rg) from the cached inventory.
+async function findVaultMeta(name) {
+  const vaults = await listVaultsRaw();
+  return vaults.find((v) => (v.name || '').toLowerCase() === name.toLowerCase());
+}
+
+// "Default" / governance tags that this tool must never edit or remove — they are
+// applied by Azure Policy / automation and are read-only here. Patterns are matched
+// case-insensitively; a trailing '*' is a prefix wildcard (e.g. "automation.*").
+// Operators can override the whole list with AZBO_PROTECTED_TAGS (comma-separated);
+// set it to an empty string to disable protection entirely.
+const PROTECTED_TAGS = (() => {
+  const def = ['env', 'environment', 'cost-center', 'costcenter', 'contact-*', 'owner',
+    'solution', 'location', 'roles', 'managed-by', 'managedby',
+    'expirationdate', 'runninginterval', 'automation.*', 'hidden-*'];
+  const raw = process.env.AZBO_PROTECTED_TAGS;
+  if (raw === undefined) return def;
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+})();
+function tagMatch(pattern, key) {
+  const p = pattern.toLowerCase(), k = String(key).toLowerCase();
+  return p.endsWith('*') ? k.startsWith(p.slice(0, -1)) : k === p;
+}
+function isProtectedTag(key) { return PROTECTED_TAGS.some((p) => tagMatch(p, key)); }
+
+// Replace a vault's tag set (management plane). The body's `tags` object is the
+// COMPLETE desired set — Key Vault's PATCH overwrites the whole tags collection.
+// Protected/default tags are force-preserved from the current state, so they can be
+// neither edited nor removed regardless of what the client sends.
+// Requires management-plane write (e.g. Contributor / Tag Contributor) on the vault.
+app.put('/api/vaults/:name/tags', (req, res) => {
+  const { name } = req.params;
+  if (!isValidName(name)) return res.status(400).json({ ok: false, error: 'Invalid vault name' });
+  const { tags } = req.body || {};
+  if (!tags || typeof tags !== 'object' || Array.isArray(tags))
+    return res.status(400).json({ ok: false, error: 'tags must be an object of name → value' });
+  const entries = Object.entries(tags);
+  if (entries.length > 50) return res.status(400).json({ ok: false, error: 'Azure allows at most 50 tags per resource' });
+  for (const [k, v] of entries) {
+    if (typeof k !== 'string' || !k.length || k.length > 512) return res.status(400).json({ ok: false, error: `Invalid tag name: ${k}` });
+    if (typeof v !== 'string' || v.length > 256) return res.status(400).json({ ok: false, error: `Invalid value for tag "${k}" (max 256 chars)` });
+  }
+  send(res, (async () => {
+    const v = await findVaultMeta(name);
+    if (!v) throw new Error('Vault not found in inventory — try Refresh first');
+    const current = v.tags || {};
+    // Start from the client's desired set, then force every protected tag that exists
+    // today back to its original value — this blocks edit AND removal of default tags.
+    const finalTags = {};
+    for (const [k, val] of entries) { if (!isProtectedTag(k)) finalTags[k] = val; }
+    for (const [k, val] of Object.entries(current)) { if (isProtectedTag(k)) finalTags[k] = val; }
+    const url = `/subscriptions/${v.subscriptionId}/resourceGroups/${v.resourceGroup}` +
+                `/providers/Microsoft.KeyVault/vaults/${name}?api-version=2023-07-01`;
+    const out = await armFetch(url, { method: 'PATCH', body: { tags: finalTags } });
+    v.tags = (out && out.tags) || finalTags;     // reflect immediately in the cached inventory
+    return { tags: v.tags };
+  })());
 });
 
 // ---- API: expiring secrets & certificates (scans every readable vault) -----
@@ -534,7 +594,8 @@ const ENV_RULES = (() => {
 })();
 const PKG_VERSION = (() => { try { return require('./package.json').version; } catch { return null; } })();
 app.get('/api/config', (req, res) =>
-  res.json({ ok: true, data: { envRules: ENV_RULES, title: process.env.AZBO_TITLE || null, version: PKG_VERSION } }));
+  res.json({ ok: true, data: { envRules: ENV_RULES, title: process.env.AZBO_TITLE || null,
+    version: PKG_VERSION, protectedTags: PROTECTED_TAGS } }));
 
 function openBrowser(url) {
   if (process.env.AZBO_NO_OPEN) return;
