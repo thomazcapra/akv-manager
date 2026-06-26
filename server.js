@@ -612,8 +612,19 @@ const getAksToken = () => getToken(AKS_AAD_SERVER_APP);
 const K8S_NAME = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/; // DNS-1123-ish (namespaces, pods, cms)
 const isK8sName = (v) => typeof v === 'string' && K8S_NAME.test(v);
 
-// Operator-supplied cluster list — NEVER baked in. JSON via AZBO_AKS_CLUSTERS, or a
-// path via AZBO_AKS_CLUSTERS_FILE. Each: { name, resourceGroup, subscription, env?, label? }.
+// Cluster list — NEVER baked in. Two sources, merged: (1) the operator's file/env
+// (AZBO_AKS_CLUSTERS / AZBO_AKS_CLUSTERS_FILE), and (2) a list the user pastes in the
+// UI, persisted in their browser's localStorage and registered with this local server
+// for the session. Each entry: { name, resourceGroup, subscription, env?, label? }.
+const RG_RE = /^[\w.()-]{1,90}$/;
+function clusterValid(c) {
+  return c && isValidName(c.name) && RG_RE.test(c.resourceGroup || '') && SUB_RE.test(c.subscription || '');
+}
+function normalizeClusters(arr, source) {
+  return (Array.isArray(arr) ? arr : []).filter((c) => c && c.name && c.resourceGroup && c.subscription)
+    .map((c) => ({ name: String(c.name), resourceGroup: String(c.resourceGroup), subscription: String(c.subscription),
+      env: c.env ? String(c.env) : '', label: c.label ? String(c.label) : String(c.name), configured: true, source }));
+}
 const AKS_CLUSTERS = (() => {
   let raw = process.env.AZBO_AKS_CLUSTERS;
   if (!raw && process.env.AZBO_AKS_CLUSTERS_FILE) {
@@ -621,13 +632,10 @@ const AKS_CLUSTERS = (() => {
     catch (e) { console.warn('  AZBO_AKS_CLUSTERS_FILE could not be read:', e.message); }
   }
   if (!raw) return [];
-  try {
-    const arr = JSON.parse(raw);
-    return (Array.isArray(arr) ? arr : []).filter((c) => c && c.name && c.resourceGroup && c.subscription)
-      .map((c) => ({ name: c.name, resourceGroup: c.resourceGroup, subscription: c.subscription,
-        env: c.env || '', label: c.label || c.name, configured: true }));
-  } catch { console.warn('  AZBO_AKS_CLUSTERS is not valid JSON — ignoring.'); return []; }
+  try { return normalizeClusters(JSON.parse(raw), 'file'); }
+  catch { console.warn('  AZBO_AKS_CLUSTERS is not valid JSON — ignoring.'); return []; }
 })();
+let SESSION_CLUSTERS = [];   // set by the client via POST /api/aks/clusters (from its localStorage)
 
 async function resolveSubId(nameOrId) {
   if (/^[0-9a-fA-F-]{36}$/.test(nameOrId)) return nameOrId;
@@ -728,7 +736,7 @@ async function aksList() {
   const discovered = await discoverClusters();
   const byKey = new Map();
   for (const c of discovered) byKey.set(c.name.toLowerCase(), c);
-  for (const c of AKS_CLUSTERS) {                 // configured entries win + carry their label/env
+  for (const c of [...AKS_CLUSTERS, ...SESSION_CLUSTERS]) {   // configured (file then session) win + carry label/env
     const prev = byKey.get(c.name.toLowerCase()) || {};
     byKey.set(c.name.toLowerCase(), { ...prev, ...c });
   }
@@ -736,7 +744,23 @@ async function aksList() {
 }
 
 app.get('/api/aks/clusters', (req, res) =>
-  send(res, aksList().then((clusters) => ({ clusters, configured: AKS_CLUSTERS.length }))));
+  send(res, aksList().then((clusters) => ({ clusters,
+    configured: AKS_CLUSTERS.length + SESSION_CLUSTERS.length, file: AKS_CLUSTERS.length, session: SESSION_CLUSTERS.length }))));
+
+// Register the user's pasted cluster list for this session (from their localStorage).
+// Replaces the previous session list; validated; localhost-only like the rest of the API.
+app.post('/api/aks/clusters', (req, res) => {
+  const { clusters } = req.body || {};
+  if (!Array.isArray(clusters)) return res.status(400).json({ ok: false, error: 'clusters must be a JSON array' });
+  if (clusters.length > 200) return res.status(400).json({ ok: false, error: 'Too many clusters (max 200)' });
+  for (const c of clusters) {
+    if (!c || !c.name || !c.resourceGroup || !c.subscription) return res.status(400).json({ ok: false, error: `Each entry needs name, resourceGroup, subscription (got: ${JSON.stringify(c).slice(0, 60)})` });
+    if (!clusterValid(c)) return res.status(400).json({ ok: false, error: `Invalid cluster entry "${c.name}" — check name / resourceGroup / subscription` });
+  }
+  SESSION_CLUSTERS = normalizeClusters(clusters, 'session');
+  aksCredCache.clear();                              // coordinates may have changed
+  res.json({ ok: true, data: { count: SESSION_CLUSTERS.length } });
+});
 
 // Resolve a :cluster route param to a known cluster, or throw a typed 400/404.
 async function getClusterChecked(name) {

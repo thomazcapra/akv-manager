@@ -56,6 +56,11 @@ AZBO_AKS_CLUSTERS_FILE=./aks-clusters.json npx akv-manager
 Each entry needs `name`, `resourceGroup`, `subscription` (name or id); `env` and
 `label` are optional. The console never bundles any cluster list — it's yours to provide.
 
+You can also **paste the list in the UI** instead of using a file: open **Clusters →
+✎ Edit cluster list**, paste the same JSON array, and Save. It's kept in your browser's
+`localStorage` and registered with the local server for the session — no file needed.
+File/env clusters and pasted clusters are merged.
+
 ## Configuration (all optional, via environment variables)
 
 | Variable | Default | Purpose |

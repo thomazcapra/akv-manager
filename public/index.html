@@ -220,7 +220,7 @@ async function boot(){
   renderSidebar();
   router();
   kickExpiryScan();   // warm the dashboard's lifecycle numbers in the background
-  loadClustersCache(); // so ⌘K can jump to clusters without visiting the section first
+  registerSessionClusters().then(loadClustersCache); // register pasted clusters, then warm ⌘K
 }
 
 async function loadSubs(){
@@ -980,32 +980,100 @@ function clErr(r){
 }
 async function loadClustersCache(){ const r=await api('/api/aks/clusters'); if(r.ok) CL.all=r.data.clusters||[]; return CL.all; }
 
+// Clusters the user pasted, kept in this browser. Registered with the local server each
+// load so the data-plane endpoints (which validate the cluster) accept them.
+function lsAks(){ try{ return localStorage.getItem('akv.aksClusters')||''; }catch{ return ''; } }
+function setLsAks(t){ try{ if(t) localStorage.setItem('akv.aksClusters',t); else localStorage.removeItem('akv.aksClusters'); }catch{} }
+async function registerSessionClusters(){
+  const txt=lsAks().trim(); if(!txt) return;
+  let arr; try{ arr=JSON.parse(txt); }catch{ return; }
+  if(!Array.isArray(arr)||!arr.length) return;
+  try{ await api('/api/aks/clusters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clusters:arr})}); }catch{}
+}
+
 async function viewClusters(){
   $('#route').innerHTML = `<div class="panel"><div class="empty"><span class="spin"></span> loading clusters…</div></div>`;
+  await registerSessionClusters();
   const r = await api('/api/aks/clusters');
   if(STATE.route!=='clusters') return;
   if(!r.ok){ $('#route').innerHTML = `<div class="panel">${clErr(r)}</div>`; return; }
   CL.all = r.data.clusters||[];
+  CL.configuredCount = r.data.configured;
+  const envs=[...new Set(CL.all.map(c=>c.env).filter(Boolean))].sort();
+  const envSeg = envs.length>1 ? `<div class="seg" id="clEnvSeg">
+    <button data-e="all" class="${CL.clEnv==='all'||!CL.clEnv?'active':''}">All</button>
+    ${envs.map(e=>`<button data-e="${esc(e)}" class="${CL.clEnv===e?'active':''}">${esc(e)}</button>`).join('')}</div>` : '';
+  $('#route').innerHTML = `
+    <div class="cmctl" style="margin-bottom:12px">
+      <input class="search" id="clqIn" placeholder="filter clusters by name, env or resource group…" value="${esc(CL.clq||'')}" autocomplete="off" style="min-width:280px">
+      ${envSeg}
+      <button class="btn sm" id="clEdit">＋ Add / edit clusters</button>
+      <span class="faint mono" id="clqCount" style="margin-left:auto"></span></div>
+    <div class="createp hide" id="clEditor"></div>
+    <div id="clTable"></div>`;
+  $('#clqIn').oninput=e=>{ CL.clq=e.target.value; renderClusterRows(); };
+  if($('#clEnvSeg')) $('#clEnvSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CL.clEnv=b.dataset.e;
+    $('#clEnvSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b)); renderClusterRows(); });
+  $('#clEdit').onclick=()=>{ const el=$('#clEditor'); el.classList.contains('hide')?openClusterEditor():el.classList.add('hide'); };
+  renderClusterRows();
+}
+function openClusterEditor(){
+  const el=$('#clEditor');
+  const stored=lsAks();
+  const seed = stored || JSON.stringify((CL.all||[]).filter(c=>c.source==='session').map(c=>({name:c.name,resourceGroup:c.resourceGroup,subscription:c.subscription,env:c.env,label:c.label})),null,2);
+  el.innerHTML = `<h4>Your cluster list · saved in this browser</h4>
+    <div class="sub" style="margin-bottom:10px">Paste a JSON array of <code>{ name, resourceGroup, subscription, env?, label? }</code>. It's stored in this browser's localStorage and registered with the local server — no file needed. Clusters from <code>AZBO_AKS_CLUSTERS(_FILE)</code> still work and are merged in.</div>
+    <div class="fld" style="align-items:flex-start"><textarea id="clJson" spellcheck="false" placeholder='[\n  { "name": "my-aks", "resourceGroup": "my-rg", "subscription": "My Sub", "env": "Dev", "label": "My cluster" }\n]' style="min-height:230px">${esc(seed)}</textarea></div>
+    <div class="actions"><button class="btn sm" onclick="saveClusterList()">Save</button>
+      <button class="btn sm ghost" onclick="document.getElementById('clEditor').classList.add('hide')">Cancel</button>
+      <button class="btn sm ghost" onclick="clearClusterList()">Clear stored</button>
+      <span class="hint" id="clJsonMsg"></span></div>`;
+  el.classList.remove('hide');
+}
+async function saveClusterList(){
+  const msg=$('#clJsonMsg'), raw=$('#clJson').value.trim();
+  let arr=[];
+  if(raw){ try{ arr=JSON.parse(raw); }catch(e){ msg.textContent='Invalid JSON: '+e.message; return; } }
+  if(!Array.isArray(arr)){ msg.textContent='Must be a JSON array'; return; }
+  for(const c of arr){ if(!c||!c.name||!c.resourceGroup||!c.subscription){ msg.textContent='Each entry needs name, resourceGroup, subscription'; return; } }
+  msg.textContent='saving…';
+  const r=await api('/api/aks/clusters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clusters:arr})});
+  if(!r.ok){ msg.textContent=r.error||'failed'; return; }
+  setLsAks(raw); CL.all=null; toast(`Saved ${r.data.count} cluster${r.data.count!==1?'s':''}`);
+  loadClustersCache(); viewClusters();
+}
+function clearClusterList(){
+  if(!confirm('Remove the clusters stored in this browser? (file / env clusters stay.)')) return;
+  setLsAks('');
+  api('/api/aks/clusters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clusters:[]})})
+    .then(()=>{ toast('Cleared stored clusters'); CL.all=null; loadClustersCache(); viewClusters(); });
+}
+function renderClusterRows(){
   if(!CL.all.length){
-    $('#route').innerHTML = `<div class="panel"><div class="empty" style="padding:42px;line-height:1.8">
-      No AKS clusters configured or visible to you.<br>
-      <span class="faint mono" style="font-size:12px">Set <b>AZBO_AKS_CLUSTERS</b> (JSON) or <b>AZBO_AKS_CLUSTERS_FILE</b> to a list of<br>
-      <code>{ name, resourceGroup, subscription, env, label }</code> and restart.</span></div></div>`;
+    $('#clqCount').textContent='';
+    $('#clTable').innerHTML=`<div class="panel"><div class="empty" style="padding:38px;line-height:1.8">No AKS clusters yet.<br>
+      <span class="faint mono" style="font-size:12px">Click <b>✎ Edit cluster list</b> to paste them, or set <b>AZBO_AKS_CLUSTERS(_FILE)</b>.</span></div></div>`;
     return;
   }
-  $('#route').innerHTML = `
-    <div class="panel"><div class="scroll"><table>
+  const q=(CL.clq||'').toLowerCase(), env=CL.clEnv||'all';
+  const list=CL.all.filter(c=>{
+    if(env!=='all' && c.env!==env) return false;
+    return !q || [c.label,c.name,c.env,c.resourceGroup,c.subscription].filter(Boolean).some(s=>String(s).toLowerCase().includes(q));
+  });
+  $('#clqCount').textContent = `${list.length}${list.length!==CL.all.length?' / '+CL.all.length:''} cluster${CL.all.length!==1?'s':''}`;
+  if(!list.length){ $('#clTable').innerHTML=`<div class="empty">No clusters match your filter.</div>`; return; }
+  $('#clTable').innerHTML = `<div class="panel"><div class="scroll"><table>
       <thead><tr><th>Cluster</th><th>Env</th><th>Version</th><th>Network</th><th>Source</th><th class="right">Actions</th></tr></thead>
-      <tbody>${CL.all.map(c=>`<tr>
+      <tbody>${list.map(c=>`<tr>
         <td class="mono"><b>${esc(c.label||c.name)}</b>${c.label&&c.label!==c.name?`<br><span class="faint" style="font-size:11px">${esc(c.name)}</span>`:''}</td>
         <td>${c.env?`<span class="tag ${envClass(c.env)}">${esc(c.env)}</span>`:'<span class="faint">—</span>'}</td>
         <td class="mono muted">${esc(c.version||'—')}</td>
         <td>${c.private?'<span class="pill policy">private · VPN</span>':c.private===false?'<span class="pill rbac">public</span>':'<span class="faint mono">?</span>'}</td>
-        <td><span class="pill">${c.configured?'configured':'discovered'}</span></td>
+        <td><span class="pill">${c.source==='session'?'pasted':c.source==='file'?'file':'discovered'}</span></td>
         <td class="right"><button class="iconbtn" onclick="openCluster('${esc(c.name)}')">Open</button></td>
       </tr>`).join('')}</tbody>
     </table></div></div>
-    <div class="tablenote">${CL.all.length} cluster${CL.all.length!==1?'s':''} · ${r.data.configured} configured locally</div>`;
+    <div class="tablenote">${CL.all.length} cluster${CL.all.length!==1?'s':''} · ${CL.configuredCount} configured locally</div>`;
 }
 function openCluster(name){ navigate('cluster/'+encodeURIComponent(name)); }
 
