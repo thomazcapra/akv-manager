@@ -32,6 +32,10 @@
   };
 </script>
 <link rel="stylesheet" href="/styles.css">
+<!-- xterm.js: in-browser terminal for the AKS pod shell -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 </head>
 <body>
 <div class="grid min-h-screen grid-cols-[236px_1fr] max-[900px]:grid-cols-1">
@@ -65,6 +69,9 @@
       <button data-view="expiry">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
         Expiry</button>
+      <button data-view="clusters">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2z"/><path d="M12 7l4 2.2v4.6L12 16l-4-2.2V9.2L12 7z"/></svg>
+        Clusters</button>
     </nav>
 
     <div class="navlabel" id="pinLabel">Pinned</div>
@@ -213,6 +220,7 @@ async function boot(){
   renderSidebar();
   router();
   kickExpiryScan();   // warm the dashboard's lifecycle numbers in the background
+  loadClustersCache(); // so ⌘K can jump to clusters without visiting the section first
 }
 
 async function loadSubs(){
@@ -237,25 +245,30 @@ const META = {
   dashboard:['Operations','Dashboard','Secrets and certificates that need attention, your pinned vaults, and access health.'],
   vaults:['Inventory','Key Vaults','Every readable vault across your subscriptions. Filter by environment and tags; open one to manage it.'],
   expiry:['Lifecycle','Expiring soon','Secrets and certificates that are expired or approaching expiry across every vault you can read.'],
+  clusters:['Kubernetes','Clusters','Read-only monitoring of your AKS clusters — browse pods, read logs and configmaps. Configured locally; runs as your az identity.'],
   settings:['Account','Account & subscriptions','Your Azure identity and the subscription the console is pointed at.'],
 };
 let mountedVault = null;
 function setHead(view){
-  const onVault = view==='vault';
-  $('#headblock').style.display = onVault ? 'none' : '';
-  $('#search').classList.toggle('hide', onVault);
-  if(!onVault && META[view]){ $('#eyebrow').textContent=META[view][0]; $('#title').textContent=META[view][1]; $('#subtitle').textContent=META[view][2]; }
-  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active', b.dataset.view===view));
+  const detail = view==='vault' || view==='cluster';   // detail pages carry their own breadcrumb
+  $('#headblock').style.display = detail ? 'none' : '';
+  $('#search').classList.toggle('hide', view!=='vaults' && view!=='dashboard' && view!=='expiry' && view!=='settings');
+  if(!detail && META[view]){ $('#eyebrow').textContent=META[view][0]; $('#title').textContent=META[view][1]; $('#subtitle').textContent=META[view][2]; }
+  const navActive = view==='vault'?'vaults' : view==='cluster'?'clusters' : view;
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active', b.dataset.view===navActive));
 }
 function router(){
   if(!STATE.account) return;
   const parts = parseHash();
   const route = parts[0]||'dashboard';
   STATE.route = route;
+  if(route!=='cluster') teardownTerm();   // close any open pod shell when leaving Clusters
   if(route!=='vault') mountedVault=null;
   if(route==='vaults'){ setHead('vaults'); viewVaults(); }
   else if(route==='vault'){ setHead('vault'); viewVault(parts[1], parts[2]||'secrets'); }
   else if(route==='expiry'){ setHead('expiry'); viewExpiry(); }
+  else if(route==='clusters'){ setHead('clusters'); viewClusters(); }
+  else if(route==='cluster'){ setHead('cluster'); viewCluster(parts[1], parts[2], parts[3]||'pods'); }
   else if(route==='settings'){ setHead('settings'); viewSettings(); }
   else { setHead('dashboard'); viewDashboard(); }
   renderSidebar();
@@ -433,7 +446,7 @@ function viewVault(name, kind){
   const v = findVault(name) || (name?{name, subscriptionId:'', resourceGroup:'', uri:'', enableRbac:'', tags:{}}:null);
   if(!v){ $('#route').innerHTML=`<div class="panel"><div class="empty">No vault specified. <a href="#/vaults">Back to Key Vaults</a></div></div>`; return; }
   STATE.drawerVault=v; STATE.kind=kind;
-  if(mountedVault!==name){
+  if(mountedVault!==name || !document.getElementById('vbody')){
     mountedVault=name;
     DRW={vault:name, kind, items:[], filter:'', sel:new Set()};
     const tabs = KIND_TABS.map(([k,l])=>`<button data-kind="${k}" class="${k===kind?'active':''}" onclick="goKind('${esc(name)}','${k}')">${l}</button>`).join('');
@@ -954,6 +967,357 @@ function card(k,v,sub,mod){
   return `<div class="card ${mod?'card--'+mod:''}"><div class="k">${esc(k)}</div><div class="v">${v} <small>${esc(sub)}</small></div></div>`;
 }
 
+// ---------- CLUSTERS (AKS — read-only: pods, logs, configmaps) ----------
+let CL = { all:null, name:'', cluster:null, ns:'', kind:'pods', items:[], namespaces:[], logPod:null, filter:'', tier:'all', cm:{} };
+let mountedCluster = null;
+function age(iso){ if(!iso) return ''; const s=(Date.now()-Date.parse(iso))/1000;
+  if(s<3600) return Math.max(1,Math.floor(s/60))+'m'; if(s<86400) return Math.floor(s/3600)+'h'; return Math.floor(s/86400)+'d'; }
+function clErr(r){
+  if(r.network) return `<div class="empty">🚫 Can't reach this cluster's API server — it's private. Connect to the corporate VPN and retry.<div class="hint" style="margin-top:8px">${esc(r.error||'')}</div></div>`;
+  if(r.needLogin) return `<div class="empty">Not signed in — run <code>az login</code>, then Refresh.</div>`;
+  if(r.forbidden) return `<div class="empty">🔒 Your identity has no Kubernetes-RBAC permission for this on this cluster.<div class="hint" style="margin-top:8px">${esc(r.error||'')}</div></div>`;
+  return `<div class="empty">${esc(r.error||'failed')}</div>`;
+}
+async function loadClustersCache(){ const r=await api('/api/aks/clusters'); if(r.ok) CL.all=r.data.clusters||[]; return CL.all; }
+
+async function viewClusters(){
+  $('#route').innerHTML = `<div class="panel"><div class="empty"><span class="spin"></span> loading clusters…</div></div>`;
+  const r = await api('/api/aks/clusters');
+  if(STATE.route!=='clusters') return;
+  if(!r.ok){ $('#route').innerHTML = `<div class="panel">${clErr(r)}</div>`; return; }
+  CL.all = r.data.clusters||[];
+  if(!CL.all.length){
+    $('#route').innerHTML = `<div class="panel"><div class="empty" style="padding:42px;line-height:1.8">
+      No AKS clusters configured or visible to you.<br>
+      <span class="faint mono" style="font-size:12px">Set <b>AZBO_AKS_CLUSTERS</b> (JSON) or <b>AZBO_AKS_CLUSTERS_FILE</b> to a list of<br>
+      <code>{ name, resourceGroup, subscription, env, label }</code> and restart.</span></div></div>`;
+    return;
+  }
+  $('#route').innerHTML = `
+    <div class="panel"><div class="scroll"><table>
+      <thead><tr><th>Cluster</th><th>Env</th><th>Version</th><th>Network</th><th>Source</th><th class="right">Actions</th></tr></thead>
+      <tbody>${CL.all.map(c=>`<tr>
+        <td class="mono"><b>${esc(c.label||c.name)}</b>${c.label&&c.label!==c.name?`<br><span class="faint" style="font-size:11px">${esc(c.name)}</span>`:''}</td>
+        <td>${c.env?`<span class="tag ${envClass(c.env)}">${esc(c.env)}</span>`:'<span class="faint">—</span>'}</td>
+        <td class="mono muted">${esc(c.version||'—')}</td>
+        <td>${c.private?'<span class="pill policy">private · VPN</span>':c.private===false?'<span class="pill rbac">public</span>':'<span class="faint mono">?</span>'}</td>
+        <td><span class="pill">${c.configured?'configured':'discovered'}</span></td>
+        <td class="right"><button class="iconbtn" onclick="openCluster('${esc(c.name)}')">Open</button></td>
+      </tr>`).join('')}</tbody>
+    </table></div></div>
+    <div class="tablenote">${CL.all.length} cluster${CL.all.length!==1?'s':''} · ${r.data.configured} configured locally</div>`;
+}
+function openCluster(name){ navigate('cluster/'+encodeURIComponent(name)); }
+
+function viewCluster(name){
+  CL.name = name;
+  if(mountedCluster!==name || !document.getElementById('clBody')){
+    mountedCluster=name; CL.ns=''; CL.items=[]; CL.namespaces=[]; CL.logPod=null; CL.cluster=null; CL.kind='pods';
+    $('#route').innerHTML = `
+      <div class="vhead">
+        <div class="crumb"><a href="#/clusters">Clusters</a><span class="sep">/</span>
+          <span class="here" id="clName">${esc(name)}</span> <span id="clEnv"></span></div>
+        <div class="vmeta" id="clMeta"><span class="faint">read-only · pods · logs · configmaps</span></div>
+      </div>
+      <div class="cmctl">
+        <div class="seg" id="clKind"><button data-k="pods" class="active">Pods</button><button data-k="configmaps">ConfigMaps</button></div>
+        <button class="btn ghost" id="clRefresh">↻ Refresh</button>
+      </div>
+      <div id="clBody"><div class="empty"><span class="spin"></span> loading…</div></div>`;
+    $('#clKind').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CL.kind=b.dataset.k;
+      $('#clKind').querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b)); loadClusterContent(); });
+    $('#clRefresh').onclick=()=>{ if(CL.logPod) fetchLogs(); else loadClusterContent(); };
+    enrichClusterMeta(name);
+    loadClusterContent();
+  } else {
+    loadClusterContent();
+  }
+}
+async function enrichClusterMeta(name){
+  const list = CL.all || await loadClustersCache();
+  const c = (list||[]).find(x=>x.name===name); if(!c) return;
+  CL.cluster=c;
+  if(STATE.route!=='cluster' || CL.name!==name) return;
+  if($('#clName')) $('#clName').textContent = c.label||c.name;
+  if($('#clEnv')&&c.env) $('#clEnv').innerHTML = `<span class="tag ${envClass(c.env)}">${esc(c.env)}</span>`;
+  if($('#clMeta')) $('#clMeta').innerHTML = `<span class="mono">${esc(c.name)}</span><span class="sep">·</span>`+
+    `<span class="mono">${esc(c.resourceGroup||'')}</span>${c.private?'<span class="sep">·</span><span class="pill policy">private · VPN</span>':''}`;
+}
+function loadClusterContent(){
+  CL.logPod=null; CL.termPod=null; CL.filter=''; teardownTerm();
+  $('#clBody').innerHTML='<div class="empty"><span class="spin"></span></div>';
+  if(CL.kind==='pods') loadPods(); else loadConfigMaps();
+}
+function clFilterBar(placeholder, extra){
+  return `<div class="cmctl" style="margin-bottom:10px">
+      <input class="search" id="clFilter" placeholder="${placeholder}" value="${esc(CL.filter)}" autocomplete="off" style="min-width:300px">
+      ${extra||''}
+      <span class="faint mono" id="clCount"></span></div>
+    <div id="clList"></div>`;
+}
+const TIER_RE = {
+  cache:/(^|-)cache(\d+)?(-|$)|-cache$/,
+  fe:/frontend|-fe-|-fe\b|-web\b|-ui\b|-spa\b/,
+  be:/backend|-be-|-be\b|-api\b|-svc\b|-worker\b|-jobs?\b|-bgjobs?\b/,
+};
+function podTier(nm){ nm=(nm||'').toLowerCase(); if(TIER_RE.cache.test(nm))return'cache'; if(TIER_RE.fe.test(nm))return'fe'; if(TIER_RE.be.test(nm))return'be'; return'other'; }
+async function loadPods(){
+  const name=CL.name;
+  const r = await api(`/api/aks/${name}/pods`);
+  if(STATE.route!=='cluster'||CL.name!==name||CL.kind!=='pods'||CL.logPod||CL.termPod) return;
+  if(!r.ok){ $('#clBody').innerHTML=clErr(r); return; }
+  CL.items=r.data||[];
+  const tier = `<div class="seg" id="clTier">
+    <button data-t="all" class="${CL.tier==='all'?'active':''}">All</button>
+    <button data-t="be" class="${CL.tier==='be'?'active':''}">Backend</button>
+    <button data-t="fe" class="${CL.tier==='fe'?'active':''}">Frontend</button>
+    <button data-t="cache" class="${CL.tier==='cache'?'active':''}">Cache</button></div>`;
+  $('#clBody').innerHTML = clFilterBar('filter pods by name or namespace…', tier);
+  $('#clFilter').oninput=e=>{ CL.filter=e.target.value; renderPodRows(); };
+  $('#clTier').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CL.tier=b.dataset.t;
+    $('#clTier').querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b)); renderPodRows(); });
+  renderPodRows();
+}
+function podMatches(p){
+  if(CL.tier!=='all' && podTier(p.name)!==CL.tier) return false;
+  const q=CL.filter.toLowerCase();
+  const nm=p.name.toLowerCase();
+  return !q || nm.includes(q) || (p.namespace||'').toLowerCase().includes(q);
+}
+function renderPodRows(){
+  const list=CL.items.filter(podMatches);
+  $('#clCount').textContent = CL.items.length ? `${list.length}${list.length!==CL.items.length?' / '+CL.items.length:''} pod${CL.items.length!==1?'s':''}` : '';
+  if(!CL.items.length){ $('#clList').innerHTML=`<div class="empty">No pods visible on this cluster.</div>`; return; }
+  if(!list.length){ $('#clList').innerHTML=`<div class="empty">No pods match your filter.</div>`; return; }
+  $('#clList').innerHTML = `<div class="panel"><div class="scroll"><table>
+    <thead><tr><th>Pod</th><th>Namespace</th><th>Build</th><th>Ready</th><th>Status</th><th class="right">Restarts</th><th>Age</th><th class="right">Actions</th></tr></thead>
+    <tbody>${list.map(p=>`<tr>
+      <td class="mono"><b><span class="ell" title="${esc(p.name)}">${esc(p.name)}</span></b></td>
+      <td class="mono muted"><span class="ell ns" title="${esc(p.namespace||'')}">${esc(p.namespace||'')}</span></td>
+      <td class="mono"><span class="ell" style="max-width:140px" title="${esc(p.build||'')}">${esc(p.build||'—')}</span></td>
+      <td class="mono">${esc(p.ready||'')}</td>
+      <td><span class="phase ${esc(p.phase||'')}">${esc(p.phase||'?')}</span></td>
+      <td class="right mono ${p.restarts>0?'':'muted'}">${p.restarts}</td>
+      <td class="mono muted">${age(p.created)}</td>
+      <td class="right" style="white-space:nowrap"><button class="iconbtn" onclick="openPodDetail('${esc(p.namespace)}','${esc(p.name)}')">Details</button>
+        <button class="iconbtn" onclick="showLogs('${esc(p.namespace)}','${esc(p.name)}')">Logs</button>
+        <button class="iconbtn" onclick="openTerminal('${esc(p.namespace)}','${esc(p.name)}')">Terminal</button>
+        <button class="iconbtn" onclick="openPodVaults('${esc(p.namespace)}','${esc(p.name)}')">Vaults</button></td>
+    </tr>`).join('')}</tbody></table></div></div>`;
+}
+async function openPodDetail(ns,pod){
+  CL.logPod=null; CL.termPod=null; teardownTerm();
+  $('#clBody').innerHTML = `<div class="cmctl"><button class="iconbtn" onclick="loadClusterContent()">← Pods</button>
+      <span class="mono"><b>${esc(pod)}</b></span><span class="faint mono">${esc(ns)}</span></div>
+    <div id="pdOut"><div class="empty"><span class="spin"></span> loading pod details…</div></div>`;
+  const r=await api(`/api/aks/${CL.name}/${ns}/pods/${pod}/detail`);
+  if(STATE.route!=='cluster') return; const out=$('#pdOut'); if(!out) return;
+  if(!r.ok){ out.innerHTML=clErr(r); return; }
+  const d=r.data; const labels=Object.entries(d.labels||{});
+  const labelChips = labels.length
+    ? `<div class="tagchips">${labels.map(([k,v])=>`<span class="tagchip"><b>${esc(k)}</b>${v?' '+esc(v):''}</span>`).join('')}</div>`
+    : '<span class="faint mono">no labels</span>';
+  const cont=(d.containers||[]).map(c=>{
+    const rows=(c.env||[]).map(e=>{
+      const val = e.value!=null ? esc(e.value)
+        : e.from ? `<span class="faint">← ${esc(e.from.kind)} ${esc(e.from.name||'')}${e.from.key?'.'+esc(e.from.key):''}</span>` : '';
+      return `<tr><td class="mono"><b>${esc(e.name)}</b></td><td class="mono" style="word-break:break-all">${val}</td></tr>`;
+    }).join('');
+    const efRows=(c.envFrom||[]).map(ef=>`<tr><td class="mono faint">∗ all keys</td><td class="mono faint">← ${esc(ef.kind)} ${esc(ef.name||'')}${ef.prefix?` (prefix ${esc(ef.prefix)})`:''}${ef.kind==='secret'?' · values not shown':''}</td></tr>`).join('');
+    const body = rows||efRows
+      ? `<div class="panel" style="margin-top:6px"><div class="scroll" style="max-height:none"><table>
+          <thead><tr><th>Env var</th><th>Value / source</th></tr></thead><tbody>${rows}${efRows}</tbody></table></div></div>`
+      : '<div class="faint mono" style="margin-top:6px">no env vars declared</div>';
+    return `<div style="margin:16px 0">
+      <div class="kvline" style="padding:4px 0"><span class="nm mono"><b>${esc(c.name)}</b>${c.init?' <span class="pill">init</span>':''}</span>
+        <span class="meta">${c.tag?`<span class="tagchip">build ${esc(c.tag)}</span>`:''}</span></div>
+      <div class="cmval">${esc(c.image||'')}</div>${body}</div>`;
+  }).join('');
+  out.innerHTML = `<div class="secthead">Labels (tags)</div>${labelChips}
+    <div class="secthead" style="margin-top:18px">Containers · image · env vars</div>${cont}`;
+}
+function showLogs(ns,pod){
+  const p = CL.items.find(x=>x.name===pod&&x.namespace===ns) || {name:pod, containers:[]};
+  CL.logNs=ns; CL.logPod=pod;
+  const conts = p.containers||[];
+  const contSel = conts.length>1
+    ? `<select class="facetsel" id="logC">${conts.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>`
+    : conts.length ? `<input type="hidden" id="logC" value="${esc(conts[0])}">` : '';
+  $('#clBody').innerHTML = `
+    <div class="cmctl">
+      <button class="iconbtn" onclick="loadClusterContent()">← Pods</button>
+      <span class="mono"><b>${esc(pod)}</b></span><span class="faint mono">${esc(ns)}</span>
+      ${contSel}
+      <select class="facetsel" id="logTail"><option value="200">200 lines</option><option value="1000" selected>1000 lines</option><option value="5000">5000 lines</option><option value="20000">20000 lines</option></select>
+      <label class="selall"><input type="checkbox" id="logTs"> timestamps</label>
+      <label class="selall"><input type="checkbox" id="logPrev"> previous (crash)</label>
+      <button class="btn sm" id="logGo">Load</button>
+      <span class="newbtns"><button class="iconbtn" id="logCopy">⧉ Copy</button><button class="iconbtn" id="logDl">↓ Download</button></span>
+    </div>
+    <div class="logbox" id="logOut"><div class="empty"><span class="spin"></span></div></div>`;
+  $('#logGo').onclick=fetchLogs;
+  $('#logTail').onchange=fetchLogs; $('#logC') && ($('#logC').onchange=fetchLogs);
+  $('#logCopy').onclick=()=>{ const t=$('#logOut').dataset.raw||''; t?copy(t):toast('Nothing to copy'); };
+  $('#logDl').onclick=downloadLog;
+  fetchLogs();
+}
+async function fetchLogs(){
+  const out=$('#logOut'); if(!out) return;
+  out.innerHTML='<div class="empty"><span class="spin"></span> fetching logs…</div>';
+  const cEl=$('#logC'); const container=cEl?cEl.value:'';
+  const qs=new URLSearchParams({tailLines:$('#logTail').value});
+  if(container) qs.set('container',container);
+  if($('#logTs').checked) qs.set('timestamps','true');
+  if($('#logPrev').checked) qs.set('previous','true');
+  const pod=CL.logPod;
+  const r=await api(`/api/aks/${CL.name}/${CL.logNs}/pods/${pod}/log?${qs.toString()}`);
+  if(STATE.route!=='cluster' || CL.logPod!==pod) return;
+  if(!r.ok){ out.innerHTML=clErr(r); return; }
+  const text=r.data.log||'';
+  out.dataset.raw=text;
+  out.textContent = text || '(empty log)';   // textContent: safe against log content
+}
+function downloadLog(){
+  const text=$('#logOut').dataset.raw||''; if(!text){ toast('Nothing to download'); return; }
+  const env=(CL.cluster&&CL.cluster.env)?CL.cluster.env+'-':'';
+  const blob=new Blob([text],{type:'text/plain'}); const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=`log-${env}${CL.logNs}-${CL.logPod}.txt`; a.click(); URL.revokeObjectURL(url);
+}
+async function loadConfigMaps(){
+  const name=CL.name;
+  const r=await api(`/api/aks/${name}/configmaps`);
+  if(STATE.route!=='cluster'||CL.name!==name||CL.kind!=='configmaps'||CL.logPod||CL.termPod) return;
+  if(!r.ok){ $('#clBody').innerHTML=clErr(r); return; }
+  CL.items=r.data||[];
+  $('#clBody').innerHTML = clFilterBar('filter configmaps by name or namespace…');
+  $('#clFilter').oninput=e=>{ CL.filter=e.target.value; renderCmRows(); };
+  renderCmRows();
+}
+function renderCmRows(){
+  const q=CL.filter.toLowerCase();
+  const list=CL.items.filter(m=>!q||m.name.toLowerCase().includes(q)||(m.namespace||'').toLowerCase().includes(q));
+  $('#clCount').textContent = CL.items.length ? `${list.length}${list.length!==CL.items.length?' / '+CL.items.length:''} configmap${CL.items.length!==1?'s':''}` : '';
+  if(!CL.items.length){ $('#clList').innerHTML=`<div class="empty">No configmaps visible on this cluster.</div>`; return; }
+  if(!list.length){ $('#clList').innerHTML=`<div class="empty">No configmaps match “${esc(CL.filter)}”.</div>`; return; }
+  $('#clList').innerHTML = `<div class="panel"><div class="scroll"><table>
+    <thead><tr><th>ConfigMap</th><th>Namespace</th><th>Keys</th><th class="right">Actions</th></tr></thead>
+    <tbody>${list.map(m=>`<tr>
+      <td class="mono"><b><span class="ell" title="${esc(m.name)}">${esc(m.name)}</span></b></td>
+      <td class="mono muted"><span class="ell ns" title="${esc(m.namespace||'')}">${esc(m.namespace||'')}</span></td>
+      <td class="faint mono ell" style="font-size:11px;max-width:360px" title="${esc((m.keys||[]).join(', '))}">${(m.keys||[]).slice(0,6).map(esc).join(', ')}${m.keys.length>6?` +${m.keys.length-6}`:''}</td>
+      <td class="right"><button class="iconbtn" onclick="viewCm('${esc(m.namespace)}','${esc(m.name)}')">View</button>
+        <button class="iconbtn" onclick="copy('kubectl describe configmap ${esc(m.name)} -n ${esc(m.namespace)}')">⧉</button></td>
+    </tr><tr><td colspan="4" style="padding:0;border:0"><div class="hide" id="cm-${esc(m.namespace)}__${esc(m.name)}"></div></td></tr>`).join('')}</tbody>
+  </table></div></div>`;
+}
+async function viewCm(ns,name){
+  const box=document.getElementById('cm-'+ns+'__'+name); if(!box) return;
+  if(!box.classList.contains('hide')){ box.classList.add('hide'); box.innerHTML=''; return; }
+  box.classList.remove('hide'); box.innerHTML='<div class="empty"><span class="spin"></span></div>';
+  const r=await api(`/api/aks/${CL.name}/${ns}/configmaps/${name}`);
+  if(!r.ok){ box.innerHTML=clErr(r); return; }
+  const data=r.data.data||{}; const keys=Object.keys(data); const ckey=ns+'/'+name; CL.cm[ckey]=data;
+  box.innerHTML = `<div style="padding:8px 0 12px">${keys.length? keys.map(k=>`
+    <div class="cmkey"><div class="kvline" style="padding:5px 0"><span class="nm mono"><b>${esc(k)}</b></span>
+      <span class="meta"><button class="iconbtn" onclick='copyCm(${JSON.stringify(ckey)},${JSON.stringify(k)})'>⧉ copy</button></span></div>
+      <pre class="cmval"></pre></div>`).join('') : '<div class="empty">empty configmap</div>'}</div>`;
+  const pres=box.querySelectorAll('pre.cmval'); keys.forEach((k,i)=>{ if(pres[i]) pres[i].textContent=data[k]; });
+}
+function copyCm(ckey,k){ const d=CL.cm[ckey]||{}; copy(d[k]!=null?String(d[k]):''); }
+
+// ---------- which Key Vaults does a pod use ----------
+async function openPodVaults(ns,pod){
+  CL.logPod=null; CL.termPod=null; teardownTerm();
+  $('#clBody').innerHTML = `<div class="cmctl"><button class="iconbtn" onclick="loadClusterContent()">← Pods</button>
+      <span class="mono"><b>${esc(pod)}</b></span><span class="faint mono">${esc(ns)}</span><span class="faint mono">Key Vault references</span></div>
+    <div id="pkvOut"><div class="empty"><span class="spin"></span> inspecting pod env, configmaps and CSI SecretProviderClasses…</div></div>`;
+  const r = await api(`/api/aks/${CL.name}/${ns}/pods/${pod}/keyvaults`);
+  if(STATE.route!=='cluster') return;
+  const out=$('#pkvOut'); if(!out) return;
+  if(!r.ok){ out.innerHTML=clErr(r); return; }
+  const vaults=r.data.vaults||[];
+  const spcs=r.data.spcs||[];
+  const eso=r.data.externalSecrets||[];
+  const unreadable=spcs.filter(s=>!s.readable);
+  const esoUnresolved=eso.filter(e=>!e.resolvable);
+  const spcNote = spcs.length
+    ? `<div style="margin-top:10px">Mounts CSI SecretProviderClass(es): <span class="tagchips" style="display:inline-flex">${spcs.map(s=>`<span class="tagchip">${esc(s.name)}${s.readable?'':' 🔒'}</span>`).join('')}</span>${unreadable.length?`<div class="hint" style="margin-top:6px">🔒 couldn't read ${unreadable.length} SecretProviderClass(es) to resolve the Key Vault — needs read on <code>secretproviderclasses</code>.</div>`:''}</div>`
+    : '';
+  const esoNote = esoUnresolved.length
+    ? `<div style="margin-top:10px">Config synced by <b>External Secrets Operator</b> from a Key Vault: <span class="tagchips" style="display:inline-flex">${esoUnresolved.map(e=>`<span class="tagchip">${esc(e.externalSecret)} 🔒</span>`).join('')}</span>
+       <div class="hint" style="margin-top:6px">🔒 the source vault is defined in the ExternalSecret's SecretStore — ${esc(esoUnresolved[0].reason||'not readable')}.</div></div>`
+    : '';
+  if(!vaults.length){
+    out.innerHTML=`<div class="empty">No Key Vault could be resolved for this pod.
+      <div class="hint" style="margin-top:8px">Checked CSI SecretProviderClasses, External Secrets, container env, and ${r.data.configmapsScanned.length} configmap(s).</div>
+      ${spcNote}${esoNote}</div>`;
+    return;
+  }
+  out.innerHTML = `<div class="panel"><div class="scroll"><table>
+    <thead><tr><th>Key Vault</th><th>Referenced via</th><th class="right">Actions</th></tr></thead>
+    <tbody>${vaults.map(v=>{ const known=findVault(v.name);
+      return `<tr><td class="mono"><b>${esc(v.name)}</b></td>
+        <td><div class="tagchips">${v.sources.map(s=>`<span class="tagchip">${esc(s)}</span>`).join('')}</div></td>
+        <td class="right">${known
+          ? `<button class="iconbtn" onclick="openVault('${esc(known.name)}')">Open vault →</button>`
+          : `<span class="faint mono" title="not in your visible inventory">not visible</span>`}</td></tr>`;
+    }).join('')}</tbody></table></div></div>
+    <div class="tablenote">${vaults.length} vault${vaults.length!==1?'s':''} · scanned ${r.data.configmapsScanned.length} configmap(s), ${spcs.length} SecretProviderClass(es), ${eso.length} ExternalSecret(s)</div>
+    ${unreadable.length?`<div class="tablenote">${spcNote}</div>`:''}
+    ${esoUnresolved.length?`<div class="tablenote">${esoNote}</div>`:''}`;
+}
+
+// ---------- in-pod terminal (xterm.js over a WS exec bridge) ----------
+let TERM=null, TERMWS=null, TERMRO=null;
+function teardownTerm(){
+  try{ TERMRO&&TERMRO.disconnect(); }catch{} TERMRO=null;
+  try{ TERMWS&&TERMWS.close(); }catch{} TERMWS=null;
+  try{ TERM&&TERM.dispose(); }catch{} TERM=null;
+}
+function openTerminal(ns,pod){
+  const p = CL.items.find(x=>x.name===pod&&x.namespace===ns) || {name:pod, containers:[]};
+  CL.logPod=null; CL.termNs=ns; CL.termPod=pod;
+  const conts=p.containers||[];
+  const contSel = conts.length>1
+    ? `<select class="facetsel" id="tmC">${conts.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>`
+    : conts.length ? `<input type="hidden" id="tmC" value="${esc(conts[0])}">` : '';
+  $('#clBody').innerHTML = `
+    <div class="cmctl">
+      <button class="iconbtn" onclick="closeTerminal()">← Pods</button>
+      <span class="mono"><b>${esc(pod)}</b></span><span class="faint mono">${esc(ns)}</span>
+      ${contSel}
+      <span class="faint mono" id="tmStatus">connecting…</span>
+      <span class="newbtns"><button class="iconbtn" id="tmReconnect">↻ Reconnect</button></span>
+    </div>
+    <div id="termHost" class="termhost"></div>`;
+  $('#tmReconnect').onclick=()=>startTerm();
+  const cSel=$('#tmC'); if(cSel && cSel.tagName==='SELECT') cSel.onchange=()=>startTerm();
+  startTerm();
+}
+function closeTerminal(){ teardownTerm(); CL.termPod=null; loadClusterContent(); }
+function tmStatus(txt, cls){ const el=$('#tmStatus'); if(!el)return; el.textContent=txt; el.className='mono '+(cls||'faint'); }
+function startTerm(){
+  if(typeof Terminal==='undefined' || typeof FitAddon==='undefined'){ tmStatus('terminal library failed to load (offline?)','dead'); return; }
+  teardownTerm();
+  const host=$('#termHost'); if(!host) return; host.innerHTML='';
+  TERM=new Terminal({ fontFamily:'"IBM Plex Mono", ui-monospace, monospace', fontSize:12.5, cursorBlink:true,
+    theme:{ background:'#070A11', foreground:'#CDE0F5', cursor:'#5B9DFF' } });
+  const fit=new FitAddon.FitAddon(); TERM.loadAddon(fit); TERM.open(host);
+  try{ fit.fit(); }catch{}
+  const cont=$('#tmC')?$('#tmC').value:'';
+  const proto=location.protocol==='https:'?'wss':'ws';
+  const qs=new URLSearchParams({cluster:CL.name, ns:CL.termNs, pod:CL.termPod}); if(cont) qs.set('container',cont);
+  const ws=new WebSocket(`${proto}://${location.host}/ws/aks/exec?${qs.toString()}`);
+  ws.binaryType='arraybuffer'; TERMWS=ws;
+  const sendResize=()=>{ try{ fit.fit(); if(ws.readyState===1) ws.send(JSON.stringify({type:'resize',cols:TERM.cols,rows:TERM.rows})); }catch{} };
+  ws.onopen=()=>{ tmStatus('connected','live'); sendResize(); TERM.focus(); };
+  ws.onmessage=ev=>{ if(typeof ev.data==='string') TERM.write(ev.data); else TERM.write(new Uint8Array(ev.data)); };
+  ws.onclose=()=>tmStatus('disconnected','dead');
+  ws.onerror=()=>tmStatus('connection error','dead');
+  TERM.onData(d=>{ if(ws.readyState===1) ws.send(new TextEncoder().encode(d)); });
+  TERMRO=new ResizeObserver(()=>sendResize()); TERMRO.observe(host);
+}
+
 // ---------- command palette ----------
 let CMDK = { open:false, items:[], cur:0 };
 function cmdkActions(){
@@ -961,6 +1325,7 @@ function cmdkActions(){
     {type:'view', label:'Dashboard', hint:'go', act:()=>navigate('dashboard')},
     {type:'view', label:'Key Vaults', hint:'go', act:()=>navigate('vaults')},
     {type:'view', label:'Expiry', hint:'go', act:()=>navigate('expiry')},
+    {type:'view', label:'Clusters', hint:'go', act:()=>navigate('clusters')},
     {type:'view', label:'Account & subscriptions', hint:'go', act:()=>navigate('settings')},
     {type:'action', label:'Refresh inventory', hint:'run', act:()=>{ doRefresh(); }},
   ];
@@ -974,16 +1339,22 @@ function renderCmdk(q){
     .filter(v=>!q || v.name.toLowerCase().includes(q) || (v.service||'').toLowerCase().includes(q) || Object.values(v.tags||{}).join(' ').toLowerCase().includes(q))
     .slice(0,40)
     .map(v=>({type:'vault', label:v.name, sub:v.env, env:v.env, act:()=>openVault(v.name)}));
-  CMDK.items = [...acts, ...vaults]; CMDK.cur=0;
+  const clusters = (CL.all||[])
+    .filter(c=>!q || (c.label||c.name).toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+    .slice(0,20)
+    .map(c=>({type:'cluster', label:c.label||c.name, sub:c.env, act:()=>openCluster(c.name)}));
+  CMDK.items = [...acts, ...clusters, ...vaults]; CMDK.cur=0;
   const list=$('#cmdkList');
   if(!CMDK.items.length){ list.innerHTML='<div class="cmdk-empty">No matches.</div>'; return; }
   const vIco='<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
+  const cIco='<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2z"/></svg>';
   const gIco='<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M5 6h14M5 18h14"/></svg>';
+  const secName={vault:'Vaults',cluster:'Clusters',view:'Go to',action:'Actions'};
   let html=''; let lastType='';
   CMDK.items.forEach((it,idx)=>{
-    if(it.type!==lastType){ html+=`<div class="cmdk-sec">${it.type==='vault'?'Vaults':it.type==='view'?'Go to':'Actions'}</div>`; lastType=it.type; }
+    if(it.type!==lastType){ html+=`<div class="cmdk-sec">${secName[it.type]||''}</div>`; lastType=it.type; }
     html+=`<div class="cmdk-it ${idx===CMDK.cur?'cur':''}" data-i="${idx}">
-      ${it.type==='vault'?vIco:gIco}
+      ${it.type==='vault'?vIco:it.type==='cluster'?cIco:gIco}
       <span class="lbl">${esc(it.label)}${it.sub?`<small>${esc(it.sub)}</small>`:''}</span>
       <span class="hint">${it.hint?esc(it.hint):'open'}</span></div>`;
   });

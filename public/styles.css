@@ -358,6 +358,29 @@
   .stick{position:sticky;top:0;z-index:5}
   .itemwrap{margin-top:8px}
 
+  /* ---------- clusters (AKS) ---------- */
+  .cmctl{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+  .cmctl .seg{padding:3px}
+  .logbox{background:#070A11;border:1px solid var(--line);border-radius:var(--r-sm);padding:13px 15px;
+          font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#CDE0F5;white-space:pre;
+          overflow:auto;max-height:calc(100vh - 300px);tab-size:2}
+  .phase{font-family:var(--mono);font-size:10px;letter-spacing:.05em;padding:2px 8px;border-radius:5px;border:1px solid var(--line);color:var(--muted)}
+  .phase.Running{color:#7FE0C8;border-color:rgba(70,214,180,.3)}
+  .phase.Pending{color:#F4C977;border-color:rgba(242,181,61,.3)}
+  .phase.Failed,.phase.Error,.phase.CrashLoopBackOff{color:#FF8893;border-color:rgba(255,92,108,.32)}
+  .phase.Succeeded,.phase.Completed{color:var(--muted)}
+  .cmval{background:#070A11;border:1px solid var(--line);border-radius:6px;padding:9px 11px;margin:0 0 4px;
+         font-family:var(--mono);font-size:11.5px;color:#A9D2FF;white-space:pre-wrap;word-break:break-word;
+         overflow:auto;max-height:320px}
+  .cmkey{padding:4px 16px 10px}
+  .cmkey .nm{font-size:12.5px}
+  .ell{display:inline-block;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+  .ell.ns{max-width:200px}
+  .termhost{height:calc(100vh - 290px);min-height:340px;background:#070A11;border:1px solid var(--line);
+            border-radius:var(--r-sm);padding:8px 4px 8px 10px;overflow:hidden}
+  .termhost .xterm{height:100%}
+  #tmStatus.live{color:var(--ok)} #tmStatus.dead{color:var(--alert)}
+
   @media (max-width:900px){
     /* .app grid + main padding handled by Tailwind max-[900px]: utilities */
     aside{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}

@@ -34,6 +34,27 @@ If you're not signed in, the UI tells you to run `az login` and press Refresh.
     **edit** values (current value pre-filled), and **batch** enable/disable/set-expiry.
 - **Expiry** — scan every readable vault for secrets/certs that are expired or near
   expiry, plotted on a time horizon.
+- **Clusters** — read-only AKS monitoring: browse namespaces and pods, read **pod
+  logs** and **configmaps**, all as your own `az` identity. Talks to the Kubernetes
+  API directly (no `kubectl`/`kubelogin` needed) via an AAD token for the managed
+  AAD server app. Private API servers need you on the right network (e.g. corporate
+  VPN); the UI flags it when a cluster is unreachable.
+
+### Configuring AKS clusters
+
+Clusters you have ARM *Reader* on are auto-discovered. If you only have **data-plane**
+(Kubernetes-RBAC) access — common — list them yourself via either variable:
+
+```bash
+# inline JSON …
+AZBO_AKS_CLUSTERS='[{"name":"my-aks","resourceGroup":"my-rg","subscription":"My Sub","env":"Dev","label":"My cluster"}]' npx akv-manager
+
+# … or a file
+AZBO_AKS_CLUSTERS_FILE=./aks-clusters.json npx akv-manager
+```
+
+Each entry needs `name`, `resourceGroup`, `subscription` (name or id); `env` and
+`label` are optional. The console never bundles any cluster list — it's yours to provide.
 
 ## Configuration (all optional, via environment variables)
 
@@ -44,6 +65,9 @@ If you're not signed in, the UI tells you to run `az login` and press Refresh.
 | `AZBO_NO_OPEN` | — | Set to anything to skip auto-opening the browser. |
 | `AZBO_TITLE` | `Keyvault Console` | Custom title shown in the sidebar. |
 | `AZBO_ENV_RULES` | — | JSON `[["pattern","Label"], …]` mapping subscription-name patterns to environment labels. |
+| `AZBO_PROTECTED_TAGS` | governance set | Comma-separated tag names that are read-only in the UI (`*` = prefix wildcard). Set empty to disable. |
+| `AZBO_AKS_CLUSTERS` | — | JSON array of `{name,resourceGroup,subscription,env?,label?}` clusters to monitor. |
+| `AZBO_AKS_CLUSTERS_FILE` | — | Path to a JSON file with the same cluster array. |
 | `AZ_PATH` | `az` | Path to the Azure CLI binary. |
 | `AZ_TIMEOUT` | `120000` | Per-`az`-call timeout (ms). |
 

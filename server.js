@@ -63,9 +63,10 @@ function az(args, { json = true } = {}) {
 
 function send(res, p) {
   p.then((data) => res.json({ ok: true, data }))
-   .catch((err) => res.status(err.needLogin ? 401 : err.forbidden ? 403 : 500).json({
+   .catch((err) => res.status(err.status || (err.needLogin ? 401 : err.forbidden ? 403 : err.notFound ? 404 : 500)).json({
      ok: false, error: err.stderr || err.message,
      needLogin: !!err.needLogin, forbidden: !!err.forbidden, firewall: !!err.firewall,
+     network: !!err.network, notFound: !!err.notFound,
    }));
 }
 
@@ -600,6 +601,468 @@ app.post('/api/batch', async (req, res) => {
   res.json({ ok: true, results });
 });
 
+// ---- API: AKS clusters (read-only monitoring: pods, logs, configmaps) -------
+// Data plane goes straight to the Kubernetes API server over HTTPS, authenticated
+// with an AAD token for the well-known managed-AAD server app — the same token
+// `kubelogin` (azurecli mode) injects, so no kubelogin/kubectl binary is needed.
+
+const https = require('https');
+const AKS_AAD_SERVER_APP = '6dae42f8-4368-4678-94ff-3960e28e3630'; // Microsoft public constant
+const getAksToken = () => getToken(AKS_AAD_SERVER_APP);
+const K8S_NAME = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/; // DNS-1123-ish (namespaces, pods, cms)
+const isK8sName = (v) => typeof v === 'string' && K8S_NAME.test(v);
+
+// Operator-supplied cluster list — NEVER baked in. JSON via AZBO_AKS_CLUSTERS, or a
+// path via AZBO_AKS_CLUSTERS_FILE. Each: { name, resourceGroup, subscription, env?, label? }.
+const AKS_CLUSTERS = (() => {
+  let raw = process.env.AZBO_AKS_CLUSTERS;
+  if (!raw && process.env.AZBO_AKS_CLUSTERS_FILE) {
+    try { raw = require('fs').readFileSync(process.env.AZBO_AKS_CLUSTERS_FILE, 'utf8'); }
+    catch (e) { console.warn('  AZBO_AKS_CLUSTERS_FILE could not be read:', e.message); }
+  }
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return (Array.isArray(arr) ? arr : []).filter((c) => c && c.name && c.resourceGroup && c.subscription)
+      .map((c) => ({ name: c.name, resourceGroup: c.resourceGroup, subscription: c.subscription,
+        env: c.env || '', label: c.label || c.name, configured: true }));
+  } catch { console.warn('  AZBO_AKS_CLUSTERS is not valid JSON — ignoring.'); return []; }
+})();
+
+async function resolveSubId(nameOrId) {
+  if (/^[0-9a-fA-F-]{36}$/.test(nameOrId)) return nameOrId;
+  const subs = await listSubscriptions();
+  const s = subs.find((x) => x.displayName === nameOrId || x.subscriptionId === nameOrId);
+  return s ? s.subscriptionId : nameOrId;
+}
+
+// Cache each cluster's API server URL + CA (from listClusterUserCredential) for 30 min.
+const aksCredCache = new Map();
+async function aksCredential(c) {
+  const key = `${c.subscription}/${c.resourceGroup}/${c.name}`;
+  const hit = aksCredCache.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60 * 1000) return hit;
+  const subId = await resolveSubId(c.subscription);
+  const url = `/subscriptions/${subId}/resourceGroups/${c.resourceGroup}` +
+              `/providers/Microsoft.ContainerService/managedClusters/${c.name}` +
+              `/listClusterUserCredential?api-version=2024-05-01`;
+  const out = await armFetch(url, { method: 'POST' });
+  const kc = out.kubeconfigs && out.kubeconfigs[0];
+  if (!kc || !kc.value) throw new Error('No kubeconfig returned for this cluster');
+  const yaml = Buffer.from(kc.value, 'base64').toString('utf8');
+  const server = (yaml.match(/server:\s*(\S+)/) || [])[1];
+  const caB64 = (yaml.match(/certificate-authority-data:\s*(\S+)/) || [])[1];
+  if (!server) throw new Error('Could not parse API server URL from kubeconfig');
+  const cred = { server: server.replace(/\/+$/, ''),
+    ca: caB64 ? Buffer.from(caB64, 'base64').toString('utf8') : undefined, at: Date.now() };
+  aksCredCache.set(key, cred);
+  return cred;
+}
+
+function k8sMsg(body) { try { return JSON.parse(body).message; } catch { return null; } }
+
+// The "build" of a pod = its container image tag (e.g. registry/app:11.5.0387 → 11.5.0387).
+// Digest-pinned images (@sha256:…) have no human tag; callers fall back to a version label.
+function imageTag(img) {
+  if (!img || img.includes('@')) return '';
+  const repoTag = img.slice(img.lastIndexOf('/') + 1);
+  const c = repoTag.indexOf(':');
+  return c >= 0 ? repoTag.slice(c + 1) : '';
+}
+
+// One GET against a cluster's Kubernetes API. raw=true returns text (for pod logs).
+function k8sGet(cred, pathQuery, { raw = false, timeout = 25000 } = {}) {
+  return new Promise((resolve, reject) => {
+    getAksToken().then((token) => {
+      const u = new URL(cred.server + pathQuery);
+      const req = https.request({
+        hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET',
+        // '*/*' for raw so the log subresource returns text/plain without tripping content negotiation
+        headers: { Authorization: `Bearer ${token}`, Accept: raw ? '*/*' : 'application/json' },
+        ca: cred.ca, timeout,
+      }, (res) => {
+        let data = ''; res.setEncoding('utf8');
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => {
+          const s = res.statusCode;
+          if (s === 401) { tokenCache.delete(AKS_AAD_SERVER_APP); return reject(Object.assign(new Error('Token rejected — run az login'), { needLogin: true })); }
+          if (s === 403) return reject(Object.assign(new Error(k8sMsg(data) || 'Forbidden'), { forbidden: true }));
+          if (s === 404) return reject(Object.assign(new Error(k8sMsg(data) || 'Not found'), { notFound: true }));
+          if (s >= 400) return reject(new Error(k8sMsg(data) || `Kubernetes returned ${s}`));
+          try { resolve(raw ? data : (data ? JSON.parse(data) : null)); }
+          catch (e) { reject(new Error('Failed to parse Kubernetes response: ' + e.message)); }
+        });
+      });
+      req.on('error', (e) => {
+        const code = e.code || '';
+        const network = /ENOTFOUND|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ECONNRESET|UNABLE_TO_VERIFY|SELF_SIGNED/.test(code + e.message);
+        reject(Object.assign(new Error(network
+          ? 'Cannot reach the cluster API server — it is private. Connect to the corporate VPN and retry.'
+          : e.message), { network }));
+      });
+      req.on('timeout', () => req.destroy(Object.assign(new Error('Cluster API request timed out — is the VPN connected?'), { network: true })));
+      req.end();
+    }).catch(reject);
+  });
+}
+
+// Discover clusters you have ARM read on (best-effort) and merge with the configured list.
+const AKS_QUERY =
+  "resources | where type =~ 'microsoft.containerservice/managedclusters' " +
+  "| project name, resourceGroup, subscriptionId, " +
+  "ver=tostring(properties.kubernetesVersion), " +
+  "priv=tostring(properties.apiServerAccessProfile.enablePrivateCluster) | order by name asc";
+async function discoverClusters() {
+  try {
+    const subIds = (await listSubscriptions()).map((s) => s.subscriptionId);
+    const out = await armFetch('/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01', {
+      method: 'POST', body: { subscriptions: subIds, query: AKS_QUERY, options: { resultFormat: 'objectArray', $top: 1000 } },
+    });
+    return (out.data || []).map((c) => ({ name: c.name, resourceGroup: c.resourceGroup,
+      subscription: c.subscriptionId, version: c.ver, private: c.priv === 'true', configured: false }));
+  } catch { return []; }
+}
+
+function clusterById(list, id) { return list.find((c) => c.name === id); }
+async function aksList() {
+  const discovered = await discoverClusters();
+  const byKey = new Map();
+  for (const c of discovered) byKey.set(c.name.toLowerCase(), c);
+  for (const c of AKS_CLUSTERS) {                 // configured entries win + carry their label/env
+    const prev = byKey.get(c.name.toLowerCase()) || {};
+    byKey.set(c.name.toLowerCase(), { ...prev, ...c });
+  }
+  return [...byKey.values()].sort((a, b) => (a.label || a.name).localeCompare(b.label || b.name));
+}
+
+app.get('/api/aks/clusters', (req, res) =>
+  send(res, aksList().then((clusters) => ({ clusters, configured: AKS_CLUSTERS.length }))));
+
+// Resolve a :cluster route param to a known cluster, or throw a typed 400/404.
+async function getClusterChecked(name) {
+  if (!isValidName(name)) throw Object.assign(new Error('Invalid cluster name'), { status: 400 });
+  const c = clusterById(await aksList(), name);
+  if (!c) throw Object.assign(new Error('Cluster is not in your configured/visible list'), { status: 404, notFound: true });
+  return c;
+}
+
+app.get('/api/aks/:cluster/namespaces', (req, res) =>
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const out = await k8sGet(cred, '/api/v1/namespaces?limit=500');
+    return (out.items || []).map((n) => ({ name: n.metadata.name, status: n.status && n.status.phase }));
+  })()));
+
+// Cluster-wide pod list (all namespaces) — each row carries its namespace.
+app.get('/api/aks/:cluster/pods', (req, res) =>
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const out = await k8sGet(cred, '/api/v1/pods?limit=5000');
+    return (out.items || []).map((p) => {
+      const cs = (p.status && p.status.containerStatuses) || [];
+      const spec = (p.spec && p.spec.containers) || [];
+      const labels = p.metadata.labels || {};
+      const build = imageTag((spec[0] || {}).image) || labels['app.kubernetes.io/version'] || labels.version || labels['tags.datadoghq.com/version'] || '';
+      return { name: p.metadata.name, namespace: p.metadata.namespace, phase: p.status && p.status.phase, node: p.spec && p.spec.nodeName,
+        build,
+        restarts: cs.reduce((a, x) => a + (x.restartCount || 0), 0),
+        ready: `${cs.filter((x) => x.ready).length}/${cs.length || spec.length}`,
+        containers: spec.map((x) => x.name), created: p.metadata.creationTimestamp };
+    });
+  })()));
+
+// Pod detail: labels (tags), images+tags, and declared env vars (names + inline values +
+// secret/configmap references). Secret VALUES are never read — only the declarations.
+app.get('/api/aks/:cluster/:ns/pods/:pod/detail', (req, res) => {
+  const { ns, pod } = req.params;
+  if (!isK8sName(ns) || !isK8sName(pod)) return res.status(400).json({ ok: false, error: 'Invalid namespace/pod' });
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const p = await k8sGet(cred, `/api/v1/namespaces/${ns}/pods/${pod}`);
+    const md = p.metadata || {}, spec = p.spec || {};
+    const inits = spec.initContainers || [];
+    const descFrom = (vf) => {
+      if (!vf) return null;
+      if (vf.secretKeyRef) return { kind: 'secret', name: vf.secretKeyRef.name, key: vf.secretKeyRef.key };
+      if (vf.configMapKeyRef) return { kind: 'configMap', name: vf.configMapKeyRef.name, key: vf.configMapKeyRef.key };
+      if (vf.fieldRef) return { kind: 'field', key: vf.fieldRef.fieldPath };
+      if (vf.resourceFieldRef) return { kind: 'resource', key: vf.resourceFieldRef.resource };
+      return { kind: '?' };
+    };
+    const containers = [...(spec.containers || []), ...inits].map((c) => ({
+      name: c.name, init: inits.includes(c), image: c.image, tag: imageTag(c.image),
+      env: (c.env || []).map((e) => ({ name: e.name, value: e.value != null ? e.value : undefined, from: descFrom(e.valueFrom) })),
+      envFrom: (c.envFrom || []).map((ef) => ({ kind: ef.secretRef ? 'secret' : ef.configMapRef ? 'configMap' : '?', name: (ef.secretRef || ef.configMapRef || {}).name, prefix: ef.prefix || '' })),
+    }));
+    return { name: md.name, namespace: md.namespace, node: spec.nodeName, labels: md.labels || {}, annotations: md.annotations || {}, containers };
+  })());
+});
+
+// Cluster-wide configmap list (all namespaces).
+app.get('/api/aks/:cluster/configmaps', (req, res) =>
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const out = await k8sGet(cred, '/api/v1/configmaps?limit=5000');
+    return (out.items || []).map((m) => ({ name: m.metadata.name, namespace: m.metadata.namespace,
+      keys: Object.keys(m.data || {}), created: m.metadata.creationTimestamp }));
+  })()));
+
+app.get('/api/aks/:cluster/:ns/pods', (req, res) => {
+  if (!isK8sName(req.params.ns)) return res.status(400).json({ ok: false, error: 'Invalid namespace' });
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const out = await k8sGet(cred, `/api/v1/namespaces/${req.params.ns}/pods?limit=1000`);
+    return (out.items || []).map((p) => {
+      const cs = (p.status && p.status.containerStatuses) || [];
+      const spec = (p.spec && p.spec.containers) || [];
+      return { name: p.metadata.name, phase: p.status && p.status.phase, node: p.spec && p.spec.nodeName,
+        restarts: cs.reduce((a, x) => a + (x.restartCount || 0), 0),
+        ready: `${cs.filter((x) => x.ready).length}/${cs.length || spec.length}`,
+        containers: spec.map((x) => x.name), created: p.metadata.creationTimestamp };
+    });
+  })());
+});
+
+app.get('/api/aks/:cluster/:ns/pods/:pod/log', (req, res) => {
+  const { ns, pod } = req.params;
+  if (!isK8sName(ns) || !isK8sName(pod)) return res.status(400).json({ ok: false, error: 'Invalid namespace/pod' });
+  const q = new URLSearchParams();
+  const tail = Math.min(20000, Math.max(1, Number(req.query.tailLines) || 1000));
+  q.set('tailLines', String(tail));
+  if (req.query.timestamps === 'true') q.set('timestamps', 'true');
+  if (req.query.previous === 'true') q.set('previous', 'true');
+  if (req.query.container && isK8sName(req.query.container)) q.set('container', req.query.container);
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const text = await k8sGet(cred, `/api/v1/namespaces/${ns}/pods/${pod}/log?${q.toString()}`, { raw: true });
+    return { log: text, lines: text ? text.split('\n').length : 0 };
+  })());
+});
+
+app.get('/api/aks/:cluster/:ns/configmaps', (req, res) => {
+  if (!isK8sName(req.params.ns)) return res.status(400).json({ ok: false, error: 'Invalid namespace' });
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const out = await k8sGet(cred, `/api/v1/namespaces/${req.params.ns}/configmaps?limit=500`);
+    return (out.items || []).map((m) => ({ name: m.metadata.name, keys: Object.keys(m.data || {}),
+      created: m.metadata.creationTimestamp }));
+  })());
+});
+
+app.get('/api/aks/:cluster/:ns/configmaps/:cm', (req, res) => {
+  const { ns, cm } = req.params;
+  if (!isK8sName(ns) || !isK8sName(cm)) return res.status(400).json({ ok: false, error: 'Invalid namespace/configmap' });
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const out = await k8sGet(cred, `/api/v1/namespaces/${ns}/configmaps/${cm}`);
+    return { name: out.metadata.name, data: out.data || {} };
+  })());
+});
+
+// Which Key Vaults does a pod reference? Three signals, best-effort:
+//   1) CSI Secrets Store — pod volume → SecretProviderClass → keyvaultName (exact, declarative)
+//   2) container env values containing a *.vault.azure.net URL
+//   3) configmaps the pod consumes (envFrom / valueFrom / volume) whose values contain one
+const VAULT_URL_RE = /\b([a-z0-9][a-z0-9-]{1,22}[a-z0-9])\.vault\.azure\.(?:net|cn|usgovcloudapi\.net)\b/gi;
+function scanVaultRefs(text, set, source, srcMap) {
+  if (typeof text !== 'string') return;
+  let m; VAULT_URL_RE.lastIndex = 0;
+  while ((m = VAULT_URL_RE.exec(text))) { const n = m[1].toLowerCase(); set.add(n); (srcMap[n] = srcMap[n] || new Set()).add(source); }
+}
+async function fetchSpc(cred, ns, name) {
+  for (const v of ['v1', 'v1alpha1']) {
+    try { return await k8sGet(cred, `/apis/secrets-store.csi.x-k8s.io/${v}/namespaces/${ns}/secretproviderclasses/${name}`); }
+    catch (e) { if (e.notFound) continue; throw e; }
+  }
+  return null;
+}
+
+app.get('/api/aks/:cluster/:ns/pods/:pod/keyvaults', (req, res) => {
+  const { ns, pod } = req.params;
+  if (!isK8sName(ns) || !isK8sName(pod)) return res.status(400).json({ ok: false, error: 'Invalid namespace/pod' });
+  send(res, (async () => {
+    const cred = await aksCredential(await getClusterChecked(req.params.cluster));
+    const p = await k8sGet(cred, `/api/v1/namespaces/${ns}/pods/${pod}`);
+    const spec = p.spec || {};
+    const containers = [...(spec.containers || []), ...(spec.initContainers || []), ...(spec.ephemeralContainers || [])];
+    const set = new Set(), srcMap = {};
+    // 2) inline env values
+    for (const c of containers) for (const e of (c.env || [])) scanVaultRefs(e.value, set, 'env', srcMap);
+    // configmaps the pod directly references (envFrom / valueFrom / configMap & projected volumes)
+    const refNames = new Set();
+    for (const c of containers) {
+      for (const ef of (c.envFrom || [])) if (ef.configMapRef && ef.configMapRef.name) refNames.add(ef.configMapRef.name);
+      for (const e of (c.env || [])) if (e.valueFrom && e.valueFrom.configMapKeyRef) refNames.add(e.valueFrom.configMapKeyRef.name);
+    }
+    for (const v of (spec.volumes || [])) {
+      if (v.configMap && v.configMap.name) refNames.add(v.configMap.name);
+      for (const s of ((v.projected && v.projected.sources) || [])) if (s.configMap && s.configMap.name) refNames.add(s.configMap.name);
+    }
+    // 3) List the namespace's configmaps (data included) and scan the ones that are either
+    //    referenced by the pod, or name-related to it (the "<app>-appsettings" convention).
+    const podLc = pod.toLowerCase();
+    const cmBase = (n) => n.toLowerCase().replace(/-(appsettings|configmap|config|settings|secrets?|env|vars|values)$/, '');
+    const scanned = [];
+    try {
+      const list = await k8sGet(cred, `/api/v1/namespaces/${ns}/configmaps?limit=500`);
+      for (const m of (list.items || [])) {
+        const nm = m.metadata.name, base = cmBase(nm);
+        const related = refNames.has(nm) || podLc === base || podLc.startsWith(base + '-') || podLc.startsWith(nm.toLowerCase() + '-');
+        if (!related) continue;
+        scanned.push(nm);
+        for (const val of Object.values(m.data || {})) scanVaultRefs(val, set, 'configmap:' + nm, srcMap);
+      }
+    } catch { /* can't list configmaps — skip that signal */ }
+    // 1) CSI SecretProviderClasses referenced by the pod's volumes
+    const spcNames = new Set();
+    for (const v of (spec.volumes || [])) {
+      const drv = (v.csi && v.csi.driver) || '';
+      if (/secrets-store\.csi/.test(drv) && v.csi.volumeAttributes && v.csi.volumeAttributes.secretProviderClass)
+        spcNames.add(v.csi.volumeAttributes.secretProviderClass);
+    }
+    const spcs = [];
+    for (const spc of spcNames) {
+      try {
+        const o = await fetchSpc(cred, ns, spc);
+        if (!o) { spcs.push({ name: spc, readable: false }); continue; }
+        const params = (o.spec && o.spec.parameters) || {};
+        const kv = params.keyvaultName || params.keyvaultname || params.keyVaultName;
+        if (kv) { const n = String(kv).toLowerCase(); set.add(n); (srcMap[n] = srcMap[n] || new Set()).add('csi:' + spc); }
+        for (const val of Object.values(params)) scanVaultRefs(String(val), set, 'csi:' + spc, srcMap);  // objects YAML etc.
+        spcs.push({ name: spc, readable: true, vault: kv ? String(kv).toLowerCase() : null });
+      } catch (e) {
+        // The CRD is often unreadable, but a SecretProviderClass is commonly named after its
+        // vault — if that name matches a vault you can see, surface it (no false positives).
+        let inferred = null;
+        try { const mv = await findVaultMeta(spc); if (mv) { const n = mv.name.toLowerCase(); set.add(n); (srcMap[n] = srcMap[n] || new Set()).add('csi:' + spc + ' (by name)'); inferred = mv.name; } } catch { /* ignore */ }
+        spcs.push({ name: spc, readable: false, forbidden: !!e.forbidden, inferredVault: inferred });
+      }
+    }
+    // 4) Secrets the pod consumes that are synced from a Key Vault by External Secrets
+    //    Operator. We read only secret METADATA (never values) to find the owning
+    //    ExternalSecret, then resolve its SecretStore's azurekv vaultUrl when readable.
+    const secretNames = new Set();
+    for (const c of containers) {
+      for (const ef of (c.envFrom || [])) if (ef.secretRef && ef.secretRef.name) secretNames.add(ef.secretRef.name);
+      for (const e of (c.env || [])) if (e.valueFrom && e.valueFrom.secretKeyRef) secretNames.add(e.valueFrom.secretKeyRef.name);
+    }
+    for (const v of (spec.volumes || [])) {
+      if (v.secret && v.secret.secretName) secretNames.add(v.secret.secretName);
+      for (const s of ((v.projected && v.projected.sources) || [])) if (s.secret && s.secret.name) secretNames.add(s.secret.name);
+    }
+    const esNames = new Set();
+    for (const sn of secretNames) {
+      try {
+        const s = await k8sGet(cred, `/api/v1/namespaces/${ns}/secrets/${sn}`);   // metadata only is used below
+        const md = s.metadata || {};
+        const owner = (md.ownerReferences || []).find((o) => o.kind === 'ExternalSecret');
+        const eso = owner || (md.labels && md.labels['reconcile.external-secrets.io/managed'] === 'true') ||
+          Object.keys(md.annotations || {}).some((a) => a.startsWith('reconcile.external-secrets.io/'));
+        if (eso) esNames.add(owner ? owner.name : sn);
+      } catch { /* can't read secret metadata — skip */ }
+    }
+    const externalSecrets = [];
+    const getCRD = async (path) => { for (const ver of ['v1', 'v1beta1']) { try { return await k8sGet(cred, path.replace('{v}', ver)); } catch (e) { if (e.notFound) continue; throw e; } } return null; };
+    for (const esn of esNames) {
+      const entry = { externalSecret: esn, vault: null, resolvable: false, reason: null };
+      try {
+        const es = await getCRD(`/apis/external-secrets.io/{v}/namespaces/${ns}/externalsecrets/${esn}`);
+        const ref = (es && es.spec && es.spec.secretStoreRef) || {};
+        const storePath = ref.kind === 'ClusterSecretStore'
+          ? `/apis/external-secrets.io/{v}/clustersecretstores/${ref.name}`
+          : `/apis/external-secrets.io/{v}/namespaces/${ns}/secretstores/${ref.name}`;
+        const store = ref.name ? await getCRD(storePath) : null;
+        const akv = store && store.spec && store.spec.provider && store.spec.provider.azurekv;
+        const url = akv && (akv.vaultUrl || akv.vaultUri);
+        const m = url && /([a-z0-9][a-z0-9-]{1,22}[a-z0-9])\.vault\.azure\./i.exec(url);
+        if (m) { const n = m[1].toLowerCase(); set.add(n); (srcMap[n] = srcMap[n] || new Set()).add('eso:' + esn); entry.vault = n; entry.resolvable = true; }
+        else entry.reason = 'store has no azurekv vaultUrl';
+      } catch (e) { entry.reason = e.forbidden ? 'needs read on externalsecrets / secretstores' : (e.message || 'unreadable'); }
+      externalSecrets.push(entry);
+    }
+    const vaults = [...set].sort().map((name) => ({ name, sources: [...(srcMap[name] || [])] }));
+    return { vaults, configmapsScanned: scanned, spcs, externalSecrets };
+  })());
+});
+
+// Interactive shell INTO a pod, in the browser. The browser opens a WebSocket to us;
+// we open an upstream WebSocket to the Kubernetes `exec` endpoint (CA + AAD bearer
+// token) and bridge the channel-framed streams. No kubectl needed. The API server
+// enforces Kubernetes RBAC (pods/exec) — this grants nothing the identity lacks.
+const { WebSocketServer, WebSocket } = require('ws');
+const execWss = new WebSocketServer({ noServer: true });
+
+function attachExecWss(server) {
+  server.on('upgrade', (req, socket, head) => {
+    let url; try { url = new URL(req.url, 'http://localhost'); } catch { socket.destroy(); return; }
+    if (url.pathname !== '/ws/aks/exec') { socket.destroy(); return; }
+    execWss.handleUpgrade(req, socket, head, (client) => bridgeExec(client, url.searchParams));
+  });
+}
+
+async function bridgeExec(client, params) {
+  const clusterName = params.get('cluster'), ns = params.get('ns'), pod = params.get('pod');
+  const container = params.get('container') || null;
+  const tell = (m) => { try { if (client.readyState === 1) client.send(m); } catch { /* ignore */ } };
+  if (!isValidName(clusterName || '') || !isK8sName(ns || '') || !isK8sName(pod || '') || (container && !isK8sName(container))) {
+    tell('\r\n\x1b[31mInvalid cluster/namespace/pod.\x1b[0m\r\n'); client.close(); return;
+  }
+  let cred, token;
+  try {
+    const c = clusterById(await aksList(), clusterName);
+    if (!c) throw new Error('Cluster is not in your configured/visible list');
+    cred = await aksCredential(c);
+    token = await getAksToken();
+  } catch (e) {
+    tell('\r\n\x1b[31m' + (e.network ? 'Cannot reach the cluster — connect to the VPN.' : (e.message || 'auth failed')) + '\x1b[0m\r\n');
+    client.close(); return;
+  }
+  const q = new URLSearchParams();
+  q.set('stdin', 'true'); q.set('stdout', 'true'); q.set('stderr', 'true'); q.set('tty', 'true');
+  if (container) q.set('container', container);
+  // Prefer bash, fall back to ash/sh — one exec, the shell picks what exists.
+  for (const part of ['/bin/sh', '-c', 'clear; (bash || ash || sh)']) q.append('command', part);
+  const wsUrl = cred.server.replace(/^https:/, 'wss:') + `/api/v1/namespaces/${ns}/pods/${pod}/exec?` + q.toString();
+
+  const upstream = new WebSocket(wsUrl, ['v4.channel.k8s.io', 'channel.k8s.io'], {
+    headers: { Authorization: `Bearer ${token}` }, ca: cred.ca,
+  });
+  let handled = false;   // so the generic 'error' doesn't double-report a decoded HTTP status
+
+  // The exec handshake is plain HTTP until it upgrades; decode a non-101 status precisely.
+  upstream.on('unexpected-response', (reqU, resU) => {
+    handled = true;
+    let body = ''; resU.on('data', (d) => { body += d; }); resU.on('end', () => {
+      let msg; try { msg = JSON.parse(body).message; } catch { /* ignore */ }
+      const s = resU.statusCode;
+      const friendly = s === 401 ? 'Not authorized — token rejected. Run az login (and check the cluster is managed-AAD).'
+        : s === 403 ? 'Forbidden — your identity lacks Kubernetes "pods/exec" permission in this namespace.'
+        : s === 404 ? 'Pod, namespace or container not found.'
+        : (msg || `Kubernetes returned ${s}`);
+      tell('\r\n\x1b[31m' + friendly + '\x1b[0m\r\n'); try { client.close(); } catch { /* ignore */ }
+    });
+  });
+
+  upstream.on('open', () => tell(`\x1b[32m● connected to ${ns}/${pod}${container ? ' [' + container + ']' : ''}\x1b[0m\r\n`));
+  upstream.on('message', (data) => {
+    if (!data || !data.length) return;
+    const ch = data[0], payload = data.subarray(1);     // channel: 1=stdout 2=stderr 3=error/status
+    if (ch === 1 || ch === 2) { if (client.readyState === 1) client.send(payload); }
+    else if (ch === 3) { try { const j = JSON.parse(payload.toString()); if (j.status === 'Failure' && j.message) tell('\r\n\x1b[31m' + j.message + '\x1b[0m\r\n'); } catch { /* ignore */ } }
+  });
+  upstream.on('close', () => { tell('\r\n\x1b[33m● session closed\x1b[0m\r\n'); try { client.close(); } catch { /* ignore */ } });
+  upstream.on('error', (e) => { if (handled) return; tell('\r\n\x1b[31m' + (e.message || 'connection error — is the VPN connected?') + '\x1b[0m\r\n'); try { client.close(); } catch { /* ignore */ } });
+
+  client.on('message', (msg, isBinary) => {
+    if (upstream.readyState !== 1) return;
+    if (isBinary) { upstream.send(Buffer.concat([Buffer.from([0]), msg])); return; }   // channel 0 = stdin
+    try { const j = JSON.parse(msg.toString());                                         // text = control (resize)
+      if (j.type === 'resize') upstream.send(Buffer.concat([Buffer.from([4]), Buffer.from(JSON.stringify({ Width: j.cols, Height: j.rows }))]));
+    } catch { /* ignore */ }
+  });
+  client.on('close', () => { try { upstream.close(); } catch { /* ignore */ } });
+}
+
 // ---- fallback --------------------------------------------------------------
 
 app.get('/api/health', (req, res) => res.json({ ok: true, az: AZ }));
@@ -613,7 +1076,7 @@ const ENV_RULES = (() => {
 const PKG_VERSION = (() => { try { return require('./package.json').version; } catch { return null; } })();
 app.get('/api/config', (req, res) =>
   res.json({ ok: true, data: { envRules: ENV_RULES, title: process.env.AZBO_TITLE || null,
-    version: PKG_VERSION, protectedTags: PROTECTED_TAGS } }));
+    version: PKG_VERSION, protectedTags: PROTECTED_TAGS, aksConfigured: AKS_CLUSTERS.length } }));
 
 function openBrowser(url) {
   if (process.env.AZBO_NO_OPEN) return;
@@ -630,6 +1093,7 @@ function start(port, attemptsLeft = 12) {
     console.log(`  Stop with Ctrl-C.\n`);
     openBrowser(url);
   });
+  attachExecWss(server);   // browser ⇆ Kubernetes exec bridge for the in-pod terminal
   server.on('error', (e) => {
     if (e.code === 'EADDRINUSE' && attemptsLeft > 0) {
       console.log(`  Port ${port} in use, trying ${port + 1}…`);
